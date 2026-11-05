@@ -1,0 +1,26 @@
+# Build outputs
+*.exe
+*.obj
+*.res
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Local settings: ClientManager.ini stores the game path and launch arguments
+# (which may contain one-time login information). Never commit it.
+# The documented default settings file is ClientManager.default.ini.
+ClientManager.ini
+
+# Debug / diagnostic logs
+*.log
+
+# Release packages
+*.zip
+
+# Visual Studio / editors / OS
+.vs/
+*.user
+*.suo
+Thumbs.db
+desktop.ini

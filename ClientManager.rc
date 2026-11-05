@@ -1,0 +1,31 @@
+#include "version.h"
+
+1 ICON "icon.ico"
+
+1 VERSIONINFO
+ FILEVERSION APP_VERSION_MAJOR,APP_VERSION_MINOR,0,0
+ PRODUCTVERSION APP_VERSION_MAJOR,APP_VERSION_MINOR,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404B0"
+        BEGIN
+            VALUE "FileDescription", "Mabinogi Client Manager"
+            VALUE "FileVersion", APP_VERSION_STR
+            VALUE "InternalName", "ClientManager"
+            VALUE "LegalCopyright", "Copyright (C) 2026"
+            VALUE "OriginalFilename", "ClientManager.exe"
+            VALUE "ProductName", "Mabinogi Client Manager"
+            VALUE "ProductVersion", APP_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0404, 1200
+    END
+END
