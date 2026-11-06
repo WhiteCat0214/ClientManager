@@ -7,5 +7,6 @@
 #define APP_VERSION_MINOR 0
 #define APP_VERSION_STR "1.0"
 #define APP_VERSION_WSTR L"1.0"
+#define APP_URL_WSTR L"https://github.com/WhiteCat0214/ClientManager"
 
 #endif

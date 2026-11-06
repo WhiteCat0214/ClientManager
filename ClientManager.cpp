@@ -1044,6 +1044,19 @@ static bool LaunchProcess(const std::wstring& path, const std::wstring& args, co
     return false;
 }
 
+// 開啟網址：本工具是管理員權限，直接開瀏覽器會讓瀏覽器也以管理員身分執行，
+// 所以優先以一般權限由 explorer 開啟 (交給使用者的預設瀏覽器)，失敗時才退回一般的 ShellExecute
+static void OpenUrl(const wchar_t* url) {
+    wchar_t win[MAX_PATH];
+    UINT n = GetWindowsDirectoryW(win, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        std::wstring dir = win;
+        DWORD err = 0;
+        if (LaunchProcess(dir + L"\\explorer.exe", L"\"" + std::wstring(url) + L"\"", dir, true, &err)) return;
+    }
+    ShellExecuteW(NULL, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+}
+
 // ---------------------------------------------------------------------------
 //  Client.exe 資訊 (路徑 / 原始參數 / 是否管理員)
 // ---------------------------------------------------------------------------
@@ -4265,10 +4278,11 @@ static void OnTrayDoubleClick() {
 //  診斷記錄只在這個視窗開啟期間收集 (不寫入檔案)，預設自動更新，可按「停止更新」手動暫停；
 //  在記錄區塊內選取文字、或捲動捲軸時也會暫停，回到最上方 / 最左邊且沒有選取時才恢復自動更新
 // ---------------------------------------------------------------------------
-enum { AB_LOG = 3001, AB_COPY, AB_PAUSE };
+enum { AB_LOG = 3001, AB_COPY, AB_PAUSE, AB_LINK };
 
 struct AboutCtx {
     HFONT font;
+    HFONT linkFont;   // 連結用的底線字型
     bool paused;
     std::wstring lastLog;
 };
@@ -4311,6 +4325,15 @@ static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         c->font = CreateFontW(-MulDiv(9, OverlayDpi(), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
         if (c->font) SendDlgItemMessageW(dlg, AB_LOG, WM_SETFONT, (WPARAM)c->font, TRUE);
+        {
+            HFONT base = (HFONT)SendMessageW(dlg, WM_GETFONT, 0, 0);
+            LOGFONTW lf;
+            if (base && GetObjectW(base, sizeof(lf), &lf)) {
+                lf.lfUnderline = TRUE;
+                c->linkFont = CreateFontIndirectW(&lf);
+                if (c->linkFont) SendDlgItemMessageW(dlg, AB_LINK, WM_SETFONT, (WPARAM)c->linkFont, TRUE);
+            }
+        }
         SetTimer(dlg, 1, 1000, NULL);   // 診斷記錄每秒更新一次
         UpdateAboutLog(dlg, c);
         SetFocus(GetDlgItem(dlg, IDCANCEL));   // 不讓記錄區塊一開啟就取得焦點 (會全選文字而暫停更新)
@@ -4318,8 +4341,27 @@ static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         UpdateAboutLog(dlg, c);
         return TRUE;
+    case WM_CTLCOLORSTATIC:   // 連結：藍色文字
+        if ((HWND)lp == GetDlgItem(dlg, AB_LINK)) {
+            HDC dc = (HDC)wp;
+            SetTextColor(dc, RGB(0, 102, 204));
+            SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
+            return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+        }
+        break;
+    case WM_SETCURSOR:   // 連結：滑鼠變成手形
+        if ((HWND)wp == GetDlgItem(dlg, AB_LINK)) {
+            SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649)));   // IDC_HAND
+            SetWindowLongPtrW(dlg, DWLP_MSGRESULT, TRUE);
+            return TRUE;
+        }
+        break;
     case WM_COMMAND: {
         int id = LOWORD(wp);
+        if (id == AB_LINK && HIWORD(wp) == 0) {
+            OpenUrl(APP_URL_WSTR);
+            return TRUE;
+        }
         if (id == AB_COPY) {
             CopyTextToClipboard(dlg, BuildDebugText());   // 立即複製目前的記錄
             return TRUE;
@@ -4341,6 +4383,10 @@ static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         if (c && c->font) {
             DeleteObject(c->font);
             c->font = NULL;
+        }
+        if (c && c->linkFont) {
+            DeleteObject(c->linkFont);
+            c->linkFont = NULL;
         }
         g_aboutDlg = NULL;
         break;
@@ -4380,10 +4426,12 @@ static void ShowAboutDialog() {
         TmplItem(t, WS_CHILD | WS_VISIBLE | st, (short)x, (short)y, (short)cx, (short)cy, id, cls, text);
         ++n;
     };
-    std::wstring aboutText = std::wstring(L"Mabinogi Client Manager  ") + T(S_ABOUT_VERSION) + L" " + APP_VERSION_WSTR + L"\n\n" + T(S_ABOUT_TEXT);
+    std::wstring verText = std::wstring(L"Mabinogi Client Manager  ") + T(S_ABOUT_VERSION) + L" " + APP_VERSION_WSTR;
     const DWORD LOGEDIT = ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL | WS_BORDER | WS_TABSTOP;
     add(BS_GROUPBOX, 8, 6, 314, 120, NOID, BTN, T(S_ABOUT_GROUP));
-    add(SS_LEFT, 14, 18, 302, 104, NOID, STC, aboutText.c_str());
+    add(SS_LEFT, 14, 18, 302, 10, NOID, STC, verText.c_str());
+    add(SS_LEFT | SS_NOTIFY, 14, 29, 175, 10, AB_LINK, STC, APP_URL_WSTR);   // 版本號下一行：GitHub 連結 (點了開啟網址)
+    add(SS_LEFT, 14, 44, 302, 78, NOID, STC, T(S_ABOUT_TEXT));
     add(BS_GROUPBOX, 8, 130, 314, 148, NOID, BTN, T(S_MON_DEBUG));
     add(LOGEDIT, 14, 142, 302, 112, AB_LOG, EDT, L"");
     add(BS_PUSHBUTTON | WS_TABSTOP, 14, 258, 50, 14, AB_COPY, BTN, T(S_DLG_COPY));
@@ -4393,6 +4441,7 @@ static void ShowAboutDialog() {
 
     AboutCtx ctx;
     ctx.font = NULL;
+    ctx.linkFont = NULL;
     ctx.paused = false;
     g_ovDebug = true;   // 診斷記錄只在關於視窗開啟期間收集
     ClearDebugText();

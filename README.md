@@ -2,6 +2,8 @@
 
 版本 1.0
 
+GitHub：<https://github.com/WhiteCat0214/ClientManager>
+
 瑪奇 (Mabinogi) `Client.exe` 的常駐管理工具 (顯示於通知區域)。
 
 > 這是非官方的第三方工具，使用前請閱讀最後的[免責聲明](#免責聲明)。
@@ -15,7 +17,7 @@
 
 ## 下載與建置
 
-- **下載：** 到本倉庫的 Releases 頁面下載壓縮檔，內含 `ClientManager.exe` 與含完整說明的 `ClientManager.ini`。
+- **下載：** 到本倉庫的 [Releases](https://github.com/WhiteCat0214/ClientManager/releases) 頁面下載壓縮檔，內含 `ClientManager.exe` 與含完整說明的 `ClientManager.ini`。
 - **自行建置：** 需要 Visual Studio 2022（工作負載：使用 C++ 的桌面開發）或 Build Tools。雙擊 `build.bat`（會自動要求管理員權限），完成後得到 `ClientManager.exe`。
 
 ## 啟動
