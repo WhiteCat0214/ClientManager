@@ -607,8 +607,34 @@ static void SaveInt(const wchar_t* key, int v) {
     SaveString(key, b);
 }
 
+// 官方網頁登入器啟動遊戲時帶入的參數：/N:、/V: 是臨時的登入帳號密碼，/T: 是橘子的標誌 (通常是 /T:gamania)。
+// 這三種參數 (連同值) 都不儲存到設定檔，重啟遊戲時也不帶入；其他參數維持原樣
+static std::wstring StripLoginArgs(const std::wstring& args) {
+    std::wstring out;
+    size_t i = 0, n = args.size();
+    while (i < n) {
+        while (i < n && (args[i] == L' ' || args[i] == L'\t')) ++i;
+        if (i >= n) break;
+        size_t start = i;
+        bool inQuote = false;
+        while (i < n && (inQuote || (args[i] != L' ' && args[i] != L'\t'))) {
+            if (args[i] == L'"') inQuote = !inQuote;
+            ++i;
+        }
+        std::wstring tok = args.substr(start, i - start);
+        size_t b = (!tok.empty() && tok[0] == L'"') ? 1 : 0;   // 整個參數被引號包起來的情況
+        bool drop = tok.size() >= b + 3 && tok[b] == L'/' && tok[b + 2] == L':' &&
+                    (tok[b + 1] == L'N' || tok[b + 1] == L'n' || tok[b + 1] == L'V' || tok[b + 1] == L'v' || tok[b + 1] == L'T' || tok[b + 1] == L't');
+        if (drop) continue;
+        if (!out.empty()) out += L' ';
+        out += tok;
+    }
+    return out;
+}
+
 // 更新「最後一次的路徑與參數」；有變動才寫入設定檔
-static void UpdateClientCache(const std::wstring& path, const std::wstring& args) {
+static void UpdateClientCache(const std::wstring& path, const std::wstring& argsIn) {
+    const std::wstring args = StripLoginArgs(argsIn);
     bool pathChanged = false;
     bool argsChanged = false;
     {
@@ -862,8 +888,13 @@ static void LoadSettings() {
     buf[0] = 0;
     GetPrivateProfileStringW(L"Settings", L"ClientArgs", L"", buf.data(), (DWORD)buf.size(), g_iniPath.c_str());
     {
-        std::lock_guard<std::mutex> lk(g_pathMtx);
-        g_cachedArgs = buf.data();
+        std::wstring raw = buf.data();
+        std::wstring clean = StripLoginArgs(raw);
+        {
+            std::lock_guard<std::mutex> lk(g_pathMtx);
+            g_cachedArgs = clean;
+        }
+        if (clean != raw) SaveString(L"ClientArgs", clean);   // 設定檔裡若已有登入參數，立刻清除
     }
 }
 
@@ -1103,7 +1134,7 @@ static ClientInfo QueryClientInfo() {
                 UnicodeStr* us = (UnicodeStr*)mem.data();
                 if (us->Buffer && us->Length) {
                     std::wstring cmd(us->Buffer, us->Length / sizeof(wchar_t));
-                    ci.args = ArgsFromCmdline(cmd);
+                    ci.args = StripLoginArgs(ArgsFromCmdline(cmd));
                 }
                 break;
             }
