@@ -1,7 +1,5 @@
 # Mabinogi Client Manager
 
-版本 1.0
-
 GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 瑪奇 (Mabinogi) `Client.exe` 的常駐管理工具 (顯示於通知區域)。
@@ -151,7 +149,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 - 若同時用 Process Lasso 管理 `Client.exe` 的優先權，請擇一使用，避免互相覆蓋。
 - 若工具被強制結束而遊戲停在暫停狀態，重新執行 `ClientManager.exe` 或執行 `ClientManager.exe /resume` 即可解除。
-- 透過官方網頁登入器啟動遊戲時帶入的 `/N:`、`/V:` (臨時登入帳號密碼) 與 `/T:` (橘子標誌，通常為 `/T:gamania`) 參數，不會儲存到設定檔，重啟遊戲時也不會帶入。因此用「重啟遊戲 (Client.exe)」重啟後無法直接進入遊戲，請改用「重啟遊戲 (Mabinogi.exe)」，並透過第三方登入器獲得登入帳號密碼後進行登入，或是自行透過官網啟動遊戲。
+- 透過官方網頁登入器啟動遊戲時帶入的 `/N:`、`/V:` (臨時登入帳號密碼) 與 `/T:` (橘子標誌，通常為 `/T:gamania`) 參數，不會儲存到設定檔，重啟遊戲時也不會帶入。因此用重啟遊戲的方式不會直接進入遊戲，請改用第三方登入器獲得登入帳號密碼後進行登入，或是結束遊戲後自行透過官網啟動遊戲。
 
 ## 免責聲明
 
