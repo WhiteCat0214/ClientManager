@@ -31,6 +31,7 @@
 #include <iphlpapi.h>
 #include <tcpestats.h>
 #include <commctrl.h>
+#include <shobjidl.h>
 #include "version.h"
 
 #pragma comment(lib, "user32.lib")
@@ -43,6 +44,7 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "ws2_32.lib")
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
@@ -58,7 +60,7 @@ enum {
     ID_TOGGLE = 1001, ID_RESET, ID_LOCK,
     ID_CPU_ENABLE, ID_CPU_ALW, ID_CPU_MIN, ID_CPU_BG,
     ID_ECO,
-    ID_RESTART_CLIENT, ID_RESTART_LAUNCHER, ID_TERM, ID_EXIT, ID_ABOUT,
+    ID_RESTART_CLIENT, ID_RESTART_LAUNCHER, ID_TERM, ID_EXIT, ID_ABOUT, ID_HIDE_TASKBAR,
     ID_RATIO_BASE = 1100,
     ID_PRIO_CPU_BASE = 1200,   // + 等級 1..6
     ID_GPU_BASE = 1240,        // + 等級 1..6
@@ -188,6 +190,10 @@ static std::atomic<bool> g_eco(true);   // 限制時同時降低優先權 + EcoQ
 static std::atomic<bool> g_run(true);
 static std::atomic<bool> g_restarting(false);
 static bool g_borderless = false;       // 只在 UI 執行緒讀寫
+static bool g_hideTaskbar = false;      // 隱藏遊戲在工作列上的按鈕 (只在 UI 執行緒讀寫)
+static ITaskbarList* g_taskbarList = NULL;
+static ULONGLONG g_tbLastApply = 0;     // 上次套用的時間 (設成 0 = 下一次偵測時立刻重新套用)
+static size_t g_tbSig = 0;              // 上次套用時的遊戲視窗組合
 static bool g_locked = false;
 
 static HANDLE g_wake = NULL;            // 喚醒引擎 (前景改變、設定改變、結束)
@@ -363,7 +369,7 @@ enum StrId {
     S_ABOUT_TEXT,
     S_DLG_STOP_UPDATE,
     S_DLG_AUTO_UPDATE,
-    S_ABOUT_VERSION,
+    S_M_HIDE_TASKBAR,
     S_M_EXIT,
     S__COUNT
 };
@@ -487,7 +493,7 @@ static const wchar_t* const kStr[S__COUNT][4] = {
       L"マビノギ (Mabinogi) Client.exe の常駐管理ツール (通知領域に表示)\n\n【主な機能】\n  ・ウィンドウのボーダーレス化 / サイズと位置のロック / 元に戻す (Kisara の疑似フルスクリーンに類似)\n  ・CPU 使用率の制限 (BES, Battle Encoder Shirase に類似)\n  ・優先度とアフィニティの設定 (Process Lasso に類似)\n  ・パフォーマンス モニター (Xbox Game Bar に類似、リソース モニターの TCP 接続遅延情報も追加)" },   // ABOUT_TEXT
     { L"停止更新", L"停止更新", L"Stop updating", L"更新を停止" },   // DLG_STOP_UPDATE
     { L"自動更新", L"自动更新", L"Auto update", L"自動更新" },   // DLG_AUTO_UPDATE
-    { L"版本", L"版本", L"Version", L"バージョン" },   // ABOUT_VERSION
+    { L"隱藏遊戲工作列", L"隐藏游戏任务栏", L"Hide game taskbar button", L"ゲームのタスクバー ボタンを隠す" },   // M_HIDE_TASKBAR
     { L"結束程式", L"退出程序", L"Exit", L"終了" },   // M_EXIT
 };
 
@@ -829,6 +835,7 @@ static void SaveOverlaySettings() {
 static void SaveWindowState() {
     SaveInt(L"Borderless", g_borderless ? 1 : 0);
     SaveInt(L"Locked", g_locked ? 1 : 0);
+    SaveInt(L"HideTaskbar", g_hideTaskbar ? 1 : 0);
 }
 
 // 啟動時把所有設定 (含預設值) 都寫進設定檔，讓檔案一開始就是完整的
@@ -868,6 +875,7 @@ static void LoadSettings() {
     g_cfgIoPrio = std::max(0, std::min(4, (int)GetPrivateProfileIntW(L"Settings", L"IoPriority", 0, g_iniPath.c_str())));
     g_borderless = (GetPrivateProfileIntW(L"Settings", L"Borderless", 0, g_iniPath.c_str()) != 0);
     g_locked = (GetPrivateProfileIntW(L"Settings", L"Locked", 0, g_iniPath.c_str()) != 0);
+    g_hideTaskbar = (GetPrivateProfileIntW(L"Settings", L"HideTaskbar", 0, g_iniPath.c_str()) != 0);
     std::vector<wchar_t> buf(32768);
     buf[0] = 0;
     GetPrivateProfileStringW(L"Settings", L"ClientPath", L"", buf.data(), (DWORD)buf.size(), g_iniPath.c_str());
@@ -1706,6 +1714,40 @@ static void InitialSync() {
 }
 
 // 每 500ms：偵測「新出現的遊戲視窗」(重啟遊戲後)，穩定後自動套用目前的無邊框/鎖定狀態
+// ---------------------------------------------------------------------------
+//  隱藏遊戲在工作列上的按鈕 (ITaskbarList::DeleteTab / AddTab)
+//  只影響工作列按鈕，不改變視窗本身
+// ---------------------------------------------------------------------------
+static bool EnsureTaskbarList() {
+    if (g_taskbarList) return true;
+    ITaskbarList* tl = NULL;
+    if (FAILED(CoCreateInstance(__uuidof(TaskbarList), NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&tl))) || !tl) return false;
+    if (FAILED(tl->HrInit())) {
+        tl->Release();
+        return false;
+    }
+    g_taskbarList = tl;
+    return true;
+}
+
+static void ReleaseTaskbarList() {
+    if (g_taskbarList) {
+        g_taskbarList->Release();
+        g_taskbarList = NULL;
+    }
+}
+
+// 對所有遊戲視窗套用 (hide = true：隱藏工作列按鈕；false：顯示)
+static void ApplyTaskbarButtons(bool hide) {
+    if (!EnsureTaskbarList()) return;
+    for (std::map<HWND, WinState>::iterator it = g_wins.begin(); it != g_wins.end(); ++it) {
+        if (!IsWindow(it->first)) continue;
+        if (hide) g_taskbarList->DeleteTab(it->first);
+        else g_taskbarList->AddTab(it->first);
+    }
+    g_tbLastApply = GetTickCount64();
+}
+
 static void SyncWindows() {
     ULONGLONG now = GetTickCount64();
     std::vector<DWORD> pids = GetClientPids();
@@ -1798,6 +1840,16 @@ static void SyncWindows() {
             it = g_wins.erase(it);
         } else {
             ++it;
+        }
+    }
+    // 隱藏遊戲工作列按鈕：遊戲視窗改變 (例如遊戲重啟) 時立刻套用，之後每 5 秒再確認一次
+    // (視窗最小化 / 還原、explorer 重啟等情況下，按鈕可能被系統重新加回來)
+    if (g_hideTaskbar && !g_wins.empty()) {
+        size_t sig = 1;
+        for (std::map<HWND, WinState>::iterator it = g_wins.begin(); it != g_wins.end(); ++it) sig = sig * 31 + (size_t)it->first;
+        if (sig != g_tbSig || GetTickCount64() - g_tbLastApply >= 5000) {
+            g_tbSig = sig;
+            ApplyTaskbarButtons(true);
         }
     }
     // 忙碌時 250ms 密集偵測，其餘時間每 1 秒檢查一次，降低閒置 CPU 使用
@@ -2275,6 +2327,7 @@ static void ModeCheck() {
 }
 
 static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD ev, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
+    if (ev == EVENT_SYSTEM_FOREGROUND || ev == EVENT_SYSTEM_MINIMIZESTART || ev == EVENT_SYSTEM_MINIMIZEEND) g_tbLastApply = 0;   // 下一次偵測時重新隱藏工作列按鈕
     if (ev == EVENT_OBJECT_LOCATIONCHANGE) {   // 只會收到遊戲行程的事件 (UpdateGameHook 以遊戲 PID 篩選)
         if (idObject == OBJID_WINDOW && hwnd && (hwnd == g_gameHwnd || g_wins.find(hwnd) != g_wins.end())) ScheduleModeCheck();
         return;
@@ -4457,7 +4510,7 @@ static void ShowAboutDialog() {
         TmplItem(t, WS_CHILD | WS_VISIBLE | st, (short)x, (short)y, (short)cx, (short)cy, id, cls, text);
         ++n;
     };
-    std::wstring verText = std::wstring(L"Mabinogi Client Manager  ") + T(S_ABOUT_VERSION) + L" " + APP_VERSION_WSTR;
+    std::wstring verText = L"Mabinogi Client Manager  v" APP_VERSION_WSTR;
     const DWORD LOGEDIT = ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL | WS_BORDER | WS_TABSTOP;
     add(BS_GROUPBOX, 8, 6, 314, 120, NOID, BTN, T(S_ABOUT_GROUP));
     add(SS_LEFT, 14, 18, 302, 10, NOID, STC, verText.c_str());
@@ -4633,6 +4686,8 @@ static void ShowMenu(HWND hwnd) {
     AppendMenuW(m, MF_STRING | (g_locked ? MF_CHECKED : 0), ID_LOCK, T(S_M_LOCK));
     AppendMenuW(m, MF_STRING, ID_RESET, T(S_M_RESET));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING | (g_hideTaskbar ? MF_CHECKED : 0), ID_HIDE_TASKBAR, T(S_M_HIDE_TASKBAR));
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 
     HMENU adv = CreatePopupMenu();
     AddLevelMenu(adv, T(S_M_CPUPRIO), false, 6, ID_PRIO_CPU_BASE, g_cfgCpuPrio);
@@ -4746,6 +4801,16 @@ static void HandleCommand(int id) {
         if (GetClientPids().empty()) ShowNoGameDialog();
         else TerminateAllClients(0);
         break;
+    case ID_HIDE_TASKBAR:
+        if (!g_hideTaskbar && GetClientPids().empty()) {   // 遊戲沒有執行時不能開啟 (關閉則隨時可以)
+            ShowNoGameDialog();
+            break;
+        }
+        g_hideTaskbar = !g_hideTaskbar;
+        SaveInt(L"HideTaskbar", g_hideTaskbar ? 1 : 0);
+        g_tbSig = 0;
+        ApplyTaskbarButtons(g_hideTaskbar);
+        break;
     case ID_ABOUT:
         ShowAboutDialog();
         break;
@@ -4791,6 +4856,8 @@ static void HandleCommand(int id) {
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (g_wmTaskbarCreated && msg == g_wmTaskbarCreated) {
         Shell_NotifyIconW(NIM_ADD, &g_nid);   // explorer 重啟後補回通知區域圖示
+        ReleaseTaskbarList();                 // 舊的 COM 物件已失效，下一次偵測時重新建立並再次隱藏
+        g_tbLastApply = 0;
         return 0;
     }
     switch (msg) {
@@ -4898,6 +4965,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     g_hiRes = (g_timer != NULL);
     if (!g_timer) g_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
 
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // ITaskbarList 需要
     g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wc;
@@ -4952,6 +5020,9 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    if (g_hideTaskbar) ApplyTaskbarButtons(false);   // 結束本工具前先恢復遊戲的工作列按鈕 (設定仍保留，下次啟動會再套用)
+    ReleaseTaskbarList();
+    CoUninitialize();
     StopMonitor();
     StopFps();
     if (g_ovHwnd) DestroyWindow(g_ovHwnd);
