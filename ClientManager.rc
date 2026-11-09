@@ -18,7 +18,7 @@ BEGIN
             VALUE "FileDescription", "Mabinogi Client Manager"
             VALUE "FileVersion", APP_VERSION_STR
             VALUE "InternalName", "ClientManager"
-            VALUE "LegalCopyright", "Copyright (C) 2026"
+            VALUE "LegalCopyright", "Copyright (C) 2026 WhiteCat0214"
             VALUE "OriginalFilename", "ClientManager.exe"
             VALUE "ProductName", "Mabinogi Client Manager"
             VALUE "ProductVersion", APP_VERSION_STR
