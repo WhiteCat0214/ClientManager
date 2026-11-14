@@ -60,7 +60,7 @@ enum {
     ID_TOGGLE = 1001, ID_RESET, ID_LOCK,
     ID_CPU_ENABLE, ID_CPU_ALW, ID_CPU_MIN, ID_CPU_BG,
     ID_ECO,
-    ID_RESTART_CLIENT, ID_RESTART_LAUNCHER, ID_TERM, ID_EXIT, ID_ABOUT, ID_HIDE_TASKBAR,
+    ID_RESTART_CLIENT, ID_RESTART_LAUNCHER, ID_TERM, ID_EXIT, ID_ABOUT, ID_HIDE_TASKBAR, ID_MOUSE_CLIP,
     ID_RATIO_BASE = 1100,
     ID_PRIO_CPU_BASE = 1200,   // + 等級 1..6
     ID_GPU_BASE = 1240,        // + 等級 1..6
@@ -194,6 +194,14 @@ static bool g_hideTaskbar = false;      // 隱藏遊戲在工作列上的按鈕 
 static ITaskbarList* g_taskbarList = NULL;
 static ULONGLONG g_tbLastApply = 0;     // 上次套用的時間 (設成 0 = 下一次偵測時立刻重新套用)
 static size_t g_tbSig = 0;              // 上次套用時的遊戲視窗組合
+static bool g_mouseClip = false;        // 限制滑鼠移動範圍 (只在 UI 執行緒讀寫)
+static bool g_mouseClipBorderless = false;   // ini 的 MouseClipBorderless：連「無邊框全視窗模式」也限制 (預設只限制全螢幕模式)
+static int g_mouseClipMargin = 15;      // ini 的 MouseClipMargin：限制範圍距離遊戲畫面四邊的像素數 (沒有設定介面，直接改 ini)
+static bool g_clipActive = false;       // 目前是否由本工具限制著滑鼠
+static RECT g_clipRect = { 0, 0, 0, 0 };   // 本工具設定的限制範圍
+static bool g_clipTimerOn = false;
+static std::string g_clipDbg;           // 診斷：遊戲最後一次為前景時的判斷細節 (只在 UI 執行緒讀寫，顯示於「關於」)
+static ULONGLONG g_clipDbgTick = 0;
 static bool g_locked = false;
 
 static HANDLE g_wake = NULL;            // 喚醒引擎 (前景改變、設定改變、結束)
@@ -370,6 +378,9 @@ enum StrId {
     S_DLG_STOP_UPDATE,
     S_DLG_AUTO_UPDATE,
     S_M_HIDE_TASKBAR,
+    S_M_MOUSE_CLIP,
+    S_TIP_WINDOWED,
+    S_TIP_FULLSCREEN,
     S_M_EXIT,
     S__COUNT
 };
@@ -494,6 +505,9 @@ static const wchar_t* const kStr[S__COUNT][4] = {
     { L"停止更新", L"停止更新", L"Stop updating", L"更新を停止" },   // DLG_STOP_UPDATE
     { L"自動更新", L"自动更新", L"Auto update", L"自動更新" },   // DLG_AUTO_UPDATE
     { L"隱藏遊戲工作列", L"隐藏游戏任务栏", L"Hide game taskbar button", L"ゲームのタスクバー ボタンを隠す" },   // M_HIDE_TASKBAR
+    { L"限制滑鼠移動範圍", L"限制鼠标移动范围", L"Restrict mouse movement area", L"マウスの移動範囲を制限" },   // M_MOUSE_CLIP
+    { L"這項功能僅在視窗模式下生效", L"该功能仅在窗口模式下生效", L"This feature only works in windowed mode", L"この機能はウィンドウモードでのみ有効です" },   // TIP_WINDOWED
+    { L"這項功能僅在全螢幕模式下生效", L"该功能仅在全屏模式下生效", L"This feature only works in fullscreen mode", L"この機能はフルスクリーンモードでのみ有効です" },   // TIP_FULLSCREEN
     { L"結束程式", L"退出程序", L"Exit", L"終了" },   // M_EXIT
 };
 
@@ -836,6 +850,7 @@ static void SaveWindowState() {
     SaveInt(L"Borderless", g_borderless ? 1 : 0);
     SaveInt(L"Locked", g_locked ? 1 : 0);
     SaveInt(L"HideTaskbar", g_hideTaskbar ? 1 : 0);
+    SaveInt(L"MouseClip", g_mouseClip ? 1 : 0);
 }
 
 // 啟動時把所有設定 (含預設值) 都寫進設定檔，讓檔案一開始就是完整的
@@ -852,9 +867,18 @@ static void SaveAllSettings() {
     SaveInt(L"GpuPriority", g_cfgGpuPrio);
     SaveInt(L"IoPriority", g_cfgIoPrio);
     SaveWindowState();
+    SaveInt(L"MouseClipMargin", g_mouseClipMargin);
+    SaveInt(L"MouseClipBorderless", g_mouseClipBorderless ? 1 : 0);
     SaveString(L"ClientPath", GetCachedPath());
     SaveString(L"ClientArgs", GetCachedArgs());
     SaveOverlaySettings();
+}
+
+// ini 的 MouseClipMargin：預設 15，範圍 0 ~ 200。每次啟動與每次從選單開啟「限制滑鼠移動範圍」時重新讀取
+static void LoadMouseClipMargin() {
+    int v = (int)GetPrivateProfileIntW(L"Settings", L"MouseClipMargin", 15, g_iniPath.c_str());
+    g_mouseClipMargin = std::max(0, std::min(200, v));
+    g_mouseClipBorderless = (GetPrivateProfileIntW(L"Settings", L"MouseClipBorderless", 0, g_iniPath.c_str()) != 0);
 }
 
 static void LoadSettings() {
@@ -876,6 +900,8 @@ static void LoadSettings() {
     g_borderless = (GetPrivateProfileIntW(L"Settings", L"Borderless", 0, g_iniPath.c_str()) != 0);
     g_locked = (GetPrivateProfileIntW(L"Settings", L"Locked", 0, g_iniPath.c_str()) != 0);
     g_hideTaskbar = (GetPrivateProfileIntW(L"Settings", L"HideTaskbar", 0, g_iniPath.c_str()) != 0);
+    g_mouseClip = (GetPrivateProfileIntW(L"Settings", L"MouseClip", 0, g_iniPath.c_str()) != 0);
+    LoadMouseClipMargin();
     std::vector<wchar_t> buf(32768);
     buf[0] = 0;
     GetPrivateProfileStringW(L"Settings", L"ClientPath", L"", buf.data(), (DWORD)buf.size(), g_iniPath.c_str());
@@ -1451,7 +1477,7 @@ static void SetAffMask(unsigned long long m) {
     ApplyBaseToAll();
 }
 
-struct WinState { RECT client; bool hasClient; bool managed; int stable; RECT last; bool lockDone; ULONGLONG enforceUntil; };
+struct WinState { RECT client; bool hasClient; bool managed; int stable; RECT last; bool lockDone; ULONGLONG enforceUntil; bool ours; };   // ours：目前的無邊框是本工具套用的
 static std::map<HWND, WinState> g_wins;   // 只在 UI 執行緒使用
 
 static WinState& GetState(HWND h) {
@@ -1471,13 +1497,19 @@ static bool HasCaption(HWND h) {
 }
 
 static void SaveClient(HWND h, WinState& ws) {
-    if (IsIconic(h) || IsZoomed(h)) return;
+    // 只記錄視窗模式 (有標題列) 的大小與位置：全螢幕或無邊框狀態的大小不能當成「原本的視窗大小」
+    if (IsIconic(h) || IsZoomed(h) || !HasCaption(h)) return;
     RECT c;
     POINT p;
     p.x = 0;
     p.y = 0;
     GetClientRect(h, &c);
     ClientToScreen(h, &p);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi) &&
+        c.right >= mi.rcMonitor.right - mi.rcMonitor.left && c.bottom >= mi.rcMonitor.bottom - mi.rcMonitor.top) return;   // 客戶區涵蓋整個螢幕 (全螢幕切換中的過渡大小)
     if (c.right > 100 && c.bottom > 100) {
         ws.client.left = p.x;
         ws.client.top = p.y;
@@ -1607,6 +1639,45 @@ static void ApplyLock(HWND h, bool lock) {
     }
 }
 
+// ---------------------------------------------------------------------------
+//  遊戲的三種顯示器模式：視窗模式 / 全螢幕模式 / 無邊框全視窗模式
+//  本工具的無邊框 / 鎖定 / 重置只在「視窗模式」(有標題列) 運作，以及「本工具自己套用的無邊框」(可以還原回視窗模式)；
+//  遊戲自己的全螢幕模式與無邊框全視窗模式 (沒有標題列、涵蓋整個螢幕、不是本工具套用的) 一律不去動
+// ---------------------------------------------------------------------------
+static bool RectCoversMonitor(HWND h) {
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    RECT wr;
+    if (!GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi) || !GetWindowRect(h, &wr)) return false;
+    return wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top && wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
+}
+
+static bool RectIsWorkArea(HWND h) {
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    RECT wr;
+    if (!GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi) || !GetWindowRect(h, &wr)) return false;
+    return EqualRect(&wr, &mi.rcWork) != 0;
+}
+
+// 本工具套用的無邊框是否還維持著：回到視窗模式 (有標題列)，或遊戲自己切成全螢幕 / 無邊框全視窗 (涵蓋整個螢幕而且不是工作區大小) 時就放手
+static void UpdateOursFlag(HWND h, WinState& ws) {
+    if (!ws.ours) return;
+    if (HasCaption(h)) {
+        ws.ours = false;
+        return;
+    }
+    if (RectCoversMonitor(h) && !RectIsWorkArea(h)) ws.ours = false;
+}
+
+// 目前是不是本工具可以控制的狀態：視窗模式，或本工具套用的無邊框
+static bool IsControllable(HWND h, WinState& ws) {
+    UpdateOursFlag(h, ws);
+    return HasCaption(h) || ws.ours;
+}
+
 static void ApplyBorderless(HWND h) {
     if (IsIconic(h) || IsZoomed(h)) ShowWindow(h, SW_RESTORE);
     LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
@@ -1620,9 +1691,11 @@ static void ApplyBorderless(HWND h) {
     SetWindowPos(h, HWND_TOP, mi.rcWork.left, mi.rcWork.top,
                  mi.rcWork.right - mi.rcWork.left, mi.rcWork.bottom - mi.rcWork.top,
                  SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    GetState(h).ours = true;   // 這個無邊框是本工具套用的
 }
 
 static void RestoreWindow(HWND h, WinState& ws) {
+    ws.ours = false;
     if (IsIconic(h) || IsZoomed(h)) ShowWindow(h, SW_RESTORE);
     LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE) | (LONG_PTR)(WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX);
     if (g_locked) s &= ~(LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
@@ -1646,19 +1719,29 @@ static void ToggleBorderless() {
         return;
     }
     LimitPause lp;
+    bool handled = false;
     for (size_t i = 0; i < wins.size(); ++i) {
         HWND h = wins[i];
         WinState& ws = GetState(h);
-        ws.managed = true;
-        if (HasCaption(h)) {
+        UpdateOursFlag(h, ws);
+        if (HasCaption(h)) {   // 視窗模式：切換成無邊框
+            ws.managed = true;
             if (IsIconic(h) || IsZoomed(h)) ShowWindow(h, SW_RESTORE);
             SaveClient(h, ws);
             ApplyBorderless(h);
             g_borderless = true;
-        } else {
+            handled = true;
+        } else if (ws.ours) {   // 本工具套用的無邊框：還原回視窗模式
+            ws.managed = true;
             RestoreWindow(h, ws);
             g_borderless = false;
+            handled = true;
         }
+        // 其他：遊戲自己的全螢幕 / 無邊框全視窗模式，不處理
+    }
+    if (!handled) {
+        Notify(T(S_TIP_WINDOWED));
+        return;
     }
     SaveWindowState();
 }
@@ -1670,10 +1753,17 @@ static void ResetWindow() {
         return;
     }
     LimitPause lp;
+    bool handled = false;
     for (size_t i = 0; i < wins.size(); ++i) {
         WinState& ws = GetState(wins[i]);
+        if (!IsControllable(wins[i], ws)) continue;   // 遊戲自己的全螢幕 / 無邊框全視窗模式：不處理
         ws.managed = true;
         RestoreWindow(wins[i], ws);
+        handled = true;
+    }
+    if (!handled) {
+        Notify(T(S_TIP_WINDOWED));
+        return;
     }
     g_borderless = false;
     SaveWindowState();
@@ -1697,20 +1787,25 @@ static void InitialSync() {
     RememberClientInfo(GetClientPids());
     std::vector<HWND> wins = GetGameWindows();
     if (wins.empty()) return;   // 遊戲沒開：沿用設定檔記錄的無邊框 / 鎖定狀態
-    g_borderless = false;
+    bool sawCaption = false, sawOurs = false;
     for (size_t i = 0; i < wins.size(); ++i) {
         HWND h = wins[i];
         WinState& ws = GetState(h);
         ws.managed = true;
         if (HasCaption(h)) {
+            sawCaption = true;
             SaveClient(h, ws);
             LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
             g_locked = ((st & WS_THICKFRAME) == 0);
             if (g_locked) EnsureLockState(h);
-        } else {
-            g_borderless = true;
+        } else if (RectIsWorkArea(h)) {
+            ws.ours = true;   // 鋪滿工作區的無邊框：視為之前由本工具套用的 (本工具重新啟動)
+            sawOurs = true;
         }
+        // 其他：遊戲自己的全螢幕 / 無邊框全視窗模式，不當作本工具的無邊框
     }
+    if (sawOurs) g_borderless = true;
+    else if (sawCaption) g_borderless = false;   // 只有遊戲自己的全螢幕時，沿用設定檔記錄的狀態
 }
 
 // 每 500ms：偵測「新出現的遊戲視窗」(重啟遊戲後)，穩定後自動套用目前的無邊框/鎖定狀態
@@ -1746,6 +1841,126 @@ static void ApplyTaskbarButtons(bool hide) {
         else g_taskbarList->AddTab(it->first);
     }
     g_tbLastApply = GetTickCount64();
+}
+
+// ---------------------------------------------------------------------------
+//  限制滑鼠移動範圍 (ClipCursor)
+//  避免遊戲在全螢幕模式下，滑鼠移到畫面邊緣時觸發視角變化：
+//  只有在「選單已啟用、遊戲為前景視窗、而且處於全螢幕模式」時，才把滑鼠限制在遊戲畫面內縮 g_mouseClipMargin 像素的範圍內；
+//  其餘情況 (切到別的視窗、最小化、離開全螢幕、關閉功能、結束本工具) 一律立刻放掉
+// ---------------------------------------------------------------------------
+// 全螢幕模式：視窗沒有標題列，而且完全涵蓋所在的整個螢幕
+static bool IsFullscreenWindow(HWND h) {
+    return !HasCaption(h) && RectCoversMonitor(h);
+}
+
+// 系統目前是否有 Direct3D 獨佔全螢幕的程式在執行 (遊戲的「全螢幕模式」；「無邊框全視窗模式」不算)。
+// 回傳 SHQueryUserNotificationState 的狀態值，查詢失敗時回傳 -1
+static int QueryD3DFullscreenState() {
+    QUERY_USER_NOTIFICATION_STATE st;
+    if (FAILED(SHQueryUserNotificationState(&st))) return -1;
+    return (int)st;
+}
+
+// 前景視窗是不是遊戲的視窗：已追蹤的遊戲主視窗，或和遊戲同一個行程的其他視窗
+// (從 Alt+Tab 回到遊戲時，前景視窗不一定剛好是已追蹤的主視窗)
+static bool IsGameForeground(HWND fg) {
+    if (!fg) return false;
+    if (g_wins.find(fg) != g_wins.end()) return true;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid != 0 && pid == g_gamePid;
+}
+
+// 放掉本工具設定的滑鼠限制 (不處理計時器)
+static void ReleaseClipOnly() {
+    if (!g_clipActive) return;
+    RECT cur;
+    if (GetClipCursor(&cur) && EqualRect(&cur, &g_clipRect)) ClipCursor(NULL);   // 只放掉自己設定的，不動遊戲等其他程式設定的
+    g_clipActive = false;
+}
+
+// 完全停止 (結束本工具時)
+static void ReleaseMouseClip() {
+    ReleaseClipOnly();
+    if (g_clipTimerOn) {
+        KillTimer(g_hWnd, 7);
+        g_clipTimerOn = false;
+    }
+}
+
+static void UpdateMouseClip() {
+    if (!g_mouseClip && !g_clipActive) return;
+    HWND fg = GetForegroundWindow();
+    bool gameFg = g_mouseClip && IsGameForeground(fg);
+    bool want = false;
+    RECT r = { 0, 0, 0, 0 }, wr = { 0, 0, 0, 0 }, mr = { 0, 0, 0, 0 };
+    bool iconic = false, caption = false, full = false, exclusive = false, topmost = false;
+    int quns = -1;
+    if (gameFg) {
+        iconic = IsIconic(fg) != 0;
+        caption = HasCaption(fg);
+        full = IsFullscreenWindow(fg);
+        topmost = (GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        if (full) {
+            quns = QueryD3DFullscreenState();
+            exclusive = (quns == QUNS_RUNNING_D3D_FULL_SCREEN);
+        }
+        GetWindowRect(fg, &wr);
+        MONITORINFO mi;
+        ZeroMemory(&mi, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi)) mr = mi.rcMonitor;
+        if (!iconic && full && (exclusive || g_mouseClipBorderless)) {   // 只在全螢幕模式 (獨佔全螢幕) 限制；ini 的 MouseClipBorderless=1 時無邊框全視窗模式也限制
+            RECT cr;
+            if (GetClientRect(fg, &cr)) {
+                POINT tl = { cr.left, cr.top }, br = { cr.right, cr.bottom };
+                ClientToScreen(fg, &tl);
+                ClientToScreen(fg, &br);
+                int w = br.x - tl.x, h = br.y - tl.y;
+                int m = std::min(g_mouseClipMargin, std::max(0, (std::min(w, h) - 2) / 2));   // 避免範圍縮到沒有大小
+                r.left = tl.x + m;
+                r.top = tl.y + m;
+                r.right = br.x - m;
+                r.bottom = br.y - m;
+                want = (r.right - r.left > 0 && r.bottom - r.top > 0);
+            }
+        }
+    }
+    if (gameFg) {   // 診斷：只記錄遊戲為前景時的狀態，內容有變化才更新
+        RECT sys = { 0, 0, 0, 0 };
+        GetClipCursor(&sys);
+        char b[480];
+        snprintf(b, sizeof(b), "mouseclip: game foreground, iconic=%d caption=%d fullscreen=%d d3dState=%d exclusive=%d topmost=%d window=[%ld,%ld,%ld,%ld] monitor=[%ld,%ld,%ld,%ld] want=%d active=%d target=[%ld,%ld,%ld,%ld] systemClip=[%ld,%ld,%ld,%ld]",
+                 iconic ? 1 : 0, caption ? 1 : 0, full ? 1 : 0, quns, exclusive ? 1 : 0, topmost ? 1 : 0,
+                 (long)wr.left, (long)wr.top, (long)wr.right, (long)wr.bottom, (long)mr.left, (long)mr.top, (long)mr.right, (long)mr.bottom,
+                 want ? 1 : 0, g_clipActive ? 1 : 0, (long)r.left, (long)r.top, (long)r.right, (long)r.bottom,
+                 (long)sys.left, (long)sys.top, (long)sys.right, (long)sys.bottom);
+        std::string cur = b;
+        if (cur != g_clipDbg) {
+            g_clipDbg = cur;
+            g_clipDbgTick = GetTickCount64();
+        }
+    }
+    // 計時器：只有「功能啟用而且遊戲是前景」時才每 0.2 秒確認一次，
+    // 所以全螢幕切換、從 Alt+Tab 回來這類過渡狀態都會在 0.2 秒內補上；不在遊戲裡時沒有計時器
+    if (gameFg && !g_clipTimerOn) {
+        SetTimer(g_hWnd, 7, 200, NULL);
+        g_clipTimerOn = true;
+    } else if (!gameFg && g_clipTimerOn) {
+        KillTimer(g_hWnd, 7);
+        g_clipTimerOn = false;
+    }
+    if (!want) {
+        ReleaseClipOnly();
+        return;
+    }
+    RECT cur;
+    if (!g_clipActive || !GetClipCursor(&cur) || !EqualRect(&cur, &r)) {   // 遊戲自己改了限制範圍時再設定回來
+        ClipCursor(&r);
+        g_clipRect = r;
+        g_clipActive = true;
+    }
 }
 
 static void SyncWindows() {
@@ -1852,6 +2067,7 @@ static void SyncWindows() {
             ApplyTaskbarButtons(true);
         }
     }
+    UpdateMouseClip();   // 限制滑鼠移動範圍 (依目前的前景視窗確認)
     // 忙碌時 250ms 密集偵測，其餘時間每 1 秒檢查一次，降低閒置 CPU 使用
     UpdateOverlayVisibility();
     UINT want = busy ? kFastMs : kIdleMs;
@@ -2306,19 +2522,24 @@ static void ModeCheck() {
     if (g_fixCount >= 6) return;
     for (std::map<HWND, WinState>::iterator it = g_wins.begin(); it != g_wins.end(); ++it) {
         HWND h = it->first;
-        if (!it->second.managed || !IsWindow(h) || IsIconic(h)) continue;
-        if (g_borderless) {
-            MONITORINFO mi;
-            ZeroMemory(&mi, sizeof(mi));
-            mi.cbSize = sizeof(mi);
-            RECT r;
-            if (!GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi) || !GetWindowRect(h, &r)) continue;
-            if (HasCaption(h) || !EqualRect(&r, &mi.rcWork)) {
+        WinState& ws = it->second;
+        if (!ws.managed || !IsWindow(h) || IsIconic(h)) continue;
+        if (!HasCaption(h)) {
+            // 沒有標題列：只處理「本工具套用的無邊框」；遊戲自己的全螢幕 / 無邊框全視窗模式不去干涉
+            UpdateOursFlag(h, ws);
+            if (g_borderless && ws.ours && !RectIsWorkArea(h)) {   // 遊戲改了我們的無邊框視窗的大小 (例如環境設定按取消)：重新鋪滿
                 LimitPause lp;
                 ApplyBorderless(h);
                 ++g_fixCount;
             }
-        } else if (g_locked && HasCaption(h) && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {
+            continue;
+        }
+        if (g_borderless) {   // 遊戲回到視窗模式：先記下視窗模式的大小與位置，再依目前的無邊框模式套用
+            LimitPause lp;
+            SaveClient(h, ws);
+            ApplyBorderless(h);
+            ++g_fixCount;
+        } else if (g_locked && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {
             LimitPause lp;
             ApplyLock(h, true);
             ++g_fixCount;
@@ -2326,10 +2547,17 @@ static void ModeCheck() {
     }
 }
 
+
 static void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD ev, HWND hwnd, LONG idObject, LONG, DWORD, DWORD) {
-    if (ev == EVENT_SYSTEM_FOREGROUND || ev == EVENT_SYSTEM_MINIMIZESTART || ev == EVENT_SYSTEM_MINIMIZEEND) g_tbLastApply = 0;   // 下一次偵測時重新隱藏工作列按鈕
+    if (ev == EVENT_SYSTEM_FOREGROUND || ev == EVENT_SYSTEM_MINIMIZESTART || ev == EVENT_SYSTEM_MINIMIZEEND) {
+        g_tbLastApply = 0;   // 下一次偵測時重新隱藏工作列按鈕
+        UpdateMouseClip();   // 前景改變時立刻套用 / 放掉滑鼠範圍限制
+    }
     if (ev == EVENT_OBJECT_LOCATIONCHANGE) {   // 只會收到遊戲行程的事件 (UpdateGameHook 以遊戲 PID 篩選)
-        if (idObject == OBJID_WINDOW && hwnd && (hwnd == g_gameHwnd || g_wins.find(hwnd) != g_wins.end())) ScheduleModeCheck();
+        if (idObject == OBJID_WINDOW && hwnd && (hwnd == g_gameHwnd || g_wins.find(hwnd) != g_wins.end())) {
+            UpdateMouseClip();   // 遊戲切換全螢幕 / 視窗模式或解析度時重新判斷
+            ScheduleModeCheck();
+        }
         return;
     }
     if (ev == EVENT_SYSTEM_MOVESIZESTART || ev == EVENT_SYSTEM_MOVESIZEEND) {
@@ -2715,6 +2943,11 @@ static std::wstring BuildDebugText() {
         std::lock_guard<std::mutex> lk(g_dbgMtx);
         out += g_cpuDbg;
         out += g_latDbg;
+    }
+    if (!g_clipDbg.empty()) {   // 滑鼠範圍限制：遊戲最後一次為前景時的判斷細節 (這個函式只在 UI 執行緒呼叫)
+        char b[96];
+        snprintf(b, sizeof(b), "  (state when the game was last in the foreground, %llu s ago)\r\n", (unsigned long long)((GetTickCount64() - g_clipDbgTick) / 1000));
+        out += g_clipDbg + b;
     }
     {
         std::lock_guard<std::mutex> lk(g_etwDbgMtx);
@@ -4676,17 +4909,120 @@ static void AddLevelMenu(HMENU parent, const wchar_t* title, bool io, int maxLev
     AppendMenuW(parent, MF_POPUP, (UINT_PTR)sub, title);
 }
 
+// ---------------------------------------------------------------------------
+//  選單提示：滑鼠停在特定選單項目上時 (WM_MENUSELECT)，用標準的 tooltips_class32 在選單旁邊顯示說明
+// ---------------------------------------------------------------------------
+static HWND g_menuTip = NULL;
+static bool g_menuTipShown = false;
+static std::wstring g_menuTipText;
+
+static const wchar_t* MenuTipText(UINT id) {
+    switch (id) {
+    case ID_TOGGLE:
+    case ID_LOCK:
+    case ID_RESET:
+        return T(S_TIP_WINDOWED);
+    case ID_MOUSE_CLIP:
+        return T(S_TIP_FULLSCREEN);
+    }
+    return NULL;
+}
+
+static void HideMenuTip() {
+    if (!g_menuTip || !g_menuTipShown) return;
+    TTTOOLINFOW ti;
+    ZeroMemory(&ti, sizeof(ti));
+    ti.cbSize = TTTOOLINFOW_V1_SIZE;
+    ti.hwnd = g_hWnd;
+    ti.uId = 1;
+    SendMessageW(g_menuTip, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+    g_menuTipShown = false;
+}
+
+static void ShowMenuTip(HMENU hm, UINT id, const wchar_t* text) {
+    int count = GetMenuItemCount(hm), idx = -1;
+    for (int i = 0; i < count; ++i) {
+        if (GetMenuItemID(hm, i) == id) {
+            idx = i;
+            break;
+        }
+    }
+    RECT rc;
+    if (idx < 0 || !GetMenuItemRect(NULL, hm, (UINT)idx, &rc)) {
+        HideMenuTip();
+        return;
+    }
+    if (!g_menuTip) {
+        g_menuTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g_hWnd, NULL, g_hInst, NULL);
+        if (!g_menuTip) return;
+        TTTOOLINFOW ti0;
+        ZeroMemory(&ti0, sizeof(ti0));
+        ti0.cbSize = TTTOOLINFOW_V1_SIZE;
+        ti0.uFlags = TTF_TRACK | TTF_ABSOLUTE;   // 追蹤式提示框：位置由我們指定
+        ti0.hwnd = g_hWnd;
+        ti0.uId = 1;
+        ti0.lpszText = (LPWSTR)L"";
+        SendMessageW(g_menuTip, TTM_ADDTOOLW, 0, (LPARAM)&ti0);
+        SendMessageW(g_menuTip, TTM_SETMAXTIPWIDTH, 0, MulDiv(400, OverlayDpi(), 96));
+    }
+    g_menuTipText = text;
+    TTTOOLINFOW ti;
+    ZeroMemory(&ti, sizeof(ti));
+    ti.cbSize = TTTOOLINFOW_V1_SIZE;
+    ti.hwnd = g_hWnd;
+    ti.uId = 1;
+    ti.lpszText = (LPWSTR)g_menuTipText.c_str();
+    SendMessageW(g_menuTip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+    // 估計提示框大小，決定放在選單項目的右側或左側 (選單靠近螢幕右緣時放左側)
+    HFONT f = (HFONT)SendMessageW(g_menuTip, WM_GETFONT, 0, 0);
+    HDC dc = GetDC(NULL);
+    HGDIOBJ oldf = f ? SelectObject(dc, f) : NULL;
+    SIZE sz = { 0, 0 };
+    GetTextExtentPoint32W(dc, g_menuTipText.c_str(), (int)g_menuTipText.size(), &sz);
+    if (oldf) SelectObject(dc, oldf);
+    ReleaseDC(NULL, dc);
+    int tw = sz.cx + MulDiv(16, OverlayDpi(), 96), th = sz.cy + MulDiv(10, OverlayDpi(), 96);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromRect(&rc, MONITOR_DEFAULTTONEAREST), &mi);
+    int gap = MulDiv(4, OverlayDpi(), 96);
+    int x = rc.right + gap;
+    if (x + tw > mi.rcWork.right) x = rc.left - tw - gap;
+    if (x < mi.rcWork.left) x = mi.rcWork.left;
+    int y = rc.top + ((rc.bottom - rc.top) - th) / 2;
+    if (y + th > mi.rcWork.bottom) y = mi.rcWork.bottom - th;
+    if (y < mi.rcWork.top) y = mi.rcWork.top;
+    SendMessageW(g_menuTip, TTM_TRACKPOSITION, 0, MAKELPARAM(x, y));
+    SendMessageW(g_menuTip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+    g_menuTipShown = true;
+}
+
 static void ShowMenu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
     int mode = g_mode;
     int ratio = g_ratio;
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING | (g_borderless ? MF_CHECKED : 0), ID_TOGGLE, T(S_M_TOGGLE));
+    // 遊戲正在執行但不是視窗模式 (全螢幕 / 無邊框全視窗)：切換無邊框與重置沒有作用，顯示為灰色 (沒有遊戲時維持可用，按下會顯示「遊戲未啟動」)
+    bool inWindowedMode = true;
+    {
+        std::vector<HWND> gw = GetGameWindows();
+        if (!gw.empty()) {
+            inWindowedMode = false;
+            for (size_t i = 0; i < gw.size(); ++i) {
+                if (IsControllable(gw[i], GetState(gw[i]))) inWindowedMode = true;
+            }
+        }
+    }
+    UINT grayFlag = inWindowedMode ? 0 : MF_GRAYED;
+    AppendMenuW(m, MF_STRING | grayFlag | (g_borderless ? MF_CHECKED : 0), ID_TOGGLE, T(S_M_TOGGLE));
     AppendMenuW(m, MF_STRING | (g_locked ? MF_CHECKED : 0), ID_LOCK, T(S_M_LOCK));
-    AppendMenuW(m, MF_STRING, ID_RESET, T(S_M_RESET));
+    AppendMenuW(m, MF_STRING | grayFlag, ID_RESET, T(S_M_RESET));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (g_hideTaskbar ? MF_CHECKED : 0), ID_HIDE_TASKBAR, T(S_M_HIDE_TASKBAR));
+    AppendMenuW(m, MF_STRING | (g_mouseClip ? MF_CHECKED : 0), ID_MOUSE_CLIP, T(S_M_MOUSE_CLIP));
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 
     HMENU adv = CreatePopupMenu();
@@ -4764,6 +5100,7 @@ static void ShowMenu(HWND hwnd) {
 
     SetForegroundWindow(hwnd);
     TrackPopupMenu(m, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, NULL);
+    HideMenuTip();
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
 }
@@ -4810,6 +5147,12 @@ static void HandleCommand(int id) {
         SaveInt(L"HideTaskbar", g_hideTaskbar ? 1 : 0);
         g_tbSig = 0;
         ApplyTaskbarButtons(g_hideTaskbar);
+        break;
+    case ID_MOUSE_CLIP:
+        g_mouseClip = !g_mouseClip;
+        if (g_mouseClip) LoadMouseClipMargin();   // 開啟時重新讀取隱藏設定，方便測試時修改 ini
+        SaveInt(L"MouseClip", g_mouseClip ? 1 : 0);
+        UpdateMouseClip();
         break;
     case ID_ABOUT:
         ShowAboutDialog();
@@ -4875,6 +5218,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         } else if (wp == 5) {
             KillTimer(hwnd, 5);
             ModeCheck();
+        } else if (wp == 7) {
+            UpdateMouseClip();
         } else if (wp == 2) {
             if (CursorOnTrayIcon()) ApplyTrayState();   // 仍停留在圖示上：更新提示
             else KillTimer(hwnd, 2);                    // 已離開：停止更新
@@ -4892,6 +5237,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         UpdateOverlayVisibility();
         if (g_ovHwnd && IsWindowVisible(g_ovHwnd)) RenderOverlay(false);
         return 0;
+    case WM_MENUSELECT: {
+        UINT flags = HIWORD(wp);
+        if (flags == 0xFFFF && lp == 0) {   // 選單已關閉
+            HideMenuTip();
+            break;
+        }
+        if (flags & (MF_POPUP | MF_SYSMENU)) {   // 子選單標題：不顯示提示
+            HideMenuTip();
+            break;
+        }
+        const wchar_t* tip = MenuTipText(LOWORD(wp));
+        if (tip) ShowMenuTip((HMENU)lp, LOWORD(wp), tip);
+        else HideMenuTip();
+        break;
+    }
     case WM_COMMAND:
         HandleCommand((int)LOWORD(wp));
         return 0;
@@ -4966,6 +5326,10 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (!g_timer) g_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);   // ITaskbarList 需要
+    INITCOMMONCONTROLSEX icc;
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_WIN95_CLASSES;
+    InitCommonControlsEx(&icc);   // 選單提示 (tooltips_class32) 需要
     g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wc;
@@ -5020,6 +5384,8 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    ReleaseMouseClip();                              // 結束本工具前先放掉滑鼠範圍限制
+    if (g_menuTip) DestroyWindow(g_menuTip);
     if (g_hideTaskbar) ApplyTaskbarButtons(false);   // 結束本工具前先恢復遊戲的工作列按鈕 (設定仍保留，下次啟動會再套用)
     ReleaseTaskbarList();
     CoUninitialize();
