@@ -5,6 +5,7 @@
 *.bat text eol=crlf
 *.md text
 
-# The settings file is UTF-16 LE with a BOM (required by the Windows INI API); never convert it
-*.ini binary
+# The settings file must be UTF-16 LE with a BOM in the working tree (required by the Windows INI API).
+# Git stores it as UTF-8 in the repository (so diffs work in GitHub Desktop) and converts it back on checkout.
+*.ini text working-tree-encoding=UTF-16LE-BOM eol=crlf
 *.ico binary
