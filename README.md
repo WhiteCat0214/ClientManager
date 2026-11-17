@@ -49,6 +49,8 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 ## 選單功能
 
+<img width="226" height="336" alt="右鍵選單一覽" src="https://github.com/user-attachments/assets/ab58c4c5-3c69-4f47-ab35-14a3bcdcd1be" />
+
 ### 切換無邊框 / 還原
 
 把遊戲視窗切換成無邊框 (鋪滿所在螢幕的工作區，不含工作列)，再按一次還原。
@@ -79,6 +81,8 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 只在遊戲顯示器模式的「全螢幕模式」(Direct3D 獨佔全螢幕) 生效，「視窗模式」與「無邊框全視窗模式」不會限制滑鼠 (可用設定檔的 `MouseClipBorderless` 改成連無邊框全視窗模式也限制)。
 
 ### 遊戲優先權 / 親和性
+
+<img width="185" height="133" alt="目前的遊戲優先權及親和性狀態" src="https://github.com/user-attachments/assets/015d43a6-edc0-44a1-9c0b-356b63291f7c" />
 
 類似 Process Lasso，只針對 `Client.exe`，偵測到遊戲啟動後自動套用，並持續確認。
 
@@ -112,6 +116,8 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 限制生效期間，通知區域圖示與遊戲視窗 (工作列) 的圖示會變成藍色，解除後換回。
 
 ### 效能監控
+
+<img width="408" height="37" alt="視窗監控" src="https://github.com/user-attachments/assets/ea190a4a-f13c-4ea9-bb10-d0f4de2732c6" />
 
 選單有三項：「啟用監控」、「鎖定位置 (滑鼠穿透)」、「監控設定...」。
 
