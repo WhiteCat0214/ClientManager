@@ -191,6 +191,7 @@ static std::atomic<bool> g_run(true);
 static std::atomic<bool> g_restarting(false);
 static bool g_borderless = false;       // 只在 UI 執行緒讀寫
 static bool g_hideTaskbar = false;      // 隱藏遊戲在工作列上的按鈕 (只在 UI 執行緒讀寫)
+static int g_lockStyle = 0;             // ini 的 LockStyle：0 = 鎖定時不改視窗樣式 (預設)，1 = 移除縮放邊框與最大化按鈕 (舊做法)
 static ITaskbarList* g_taskbarList = NULL;
 static ULONGLONG g_tbLastApply = 0;     // 上次套用的時間 (設成 0 = 下一次偵測時立刻重新套用)
 static size_t g_tbSig = 0;              // 上次套用時的遊戲視窗組合
@@ -869,6 +870,7 @@ static void SaveAllSettings() {
     SaveWindowState();
     SaveInt(L"MouseClipMargin", g_mouseClipMargin);
     SaveInt(L"MouseClipBorderless", g_mouseClipBorderless ? 1 : 0);
+    SaveInt(L"LockStyle", g_lockStyle);
     SaveString(L"ClientPath", GetCachedPath());
     SaveString(L"ClientArgs", GetCachedArgs());
     SaveOverlaySettings();
@@ -901,6 +903,7 @@ static void LoadSettings() {
     g_locked = (GetPrivateProfileIntW(L"Settings", L"Locked", 0, g_iniPath.c_str()) != 0);
     g_hideTaskbar = (GetPrivateProfileIntW(L"Settings", L"HideTaskbar", 0, g_iniPath.c_str()) != 0);
     g_mouseClip = (GetPrivateProfileIntW(L"Settings", L"MouseClip", 0, g_iniPath.c_str()) != 0);
+    g_lockStyle = (GetPrivateProfileIntW(L"Settings", L"LockStyle", 0, g_iniPath.c_str()) != 0) ? 1 : 0;
     LoadMouseClipMargin();
     std::vector<wchar_t> buf(32768);
     buf[0] = 0;
@@ -1603,7 +1606,13 @@ static void UpdateLockPos(HWND h) {
 
 static void SetMoveMenu(HWND h, bool enabled) {
     HMENU sm = GetSystemMenu(h, FALSE);
-    if (sm) EnableMenuItem(sm, SC_MOVE, MF_BYCOMMAND | (enabled ? MF_ENABLED : MF_GRAYED));
+    if (!sm) return;
+    UINT f = MF_BYCOMMAND | (enabled ? MF_ENABLED : MF_GRAYED);
+    EnableMenuItem(sm, SC_MOVE, f);
+    if (g_lockStyle == 0) {   // 不改視窗樣式的鎖定：「大小」「最大化」也一起變灰
+        EnableMenuItem(sm, SC_SIZE, f);
+        EnableMenuItem(sm, SC_MAXIMIZE, f);
+    }
 }
 
 static void EnsureLockState(HWND h) {
@@ -1626,10 +1635,12 @@ static void StartRegrayBurst() {
 
 static void ApplyLock(HWND h, bool lock) {
     if (!HasCaption(h)) return;   // 無邊框狀態下沒有邊框可鎖，還原時才會套用
-    LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
-    if (lock) s &= ~(LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
-    else s |= (LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
-    SetStyleKeepClient(h, s);
+    if (g_lockStyle == 1) {       // 舊做法：移除縮放邊框與最大化按鈕 (部分情況下遊戲自己切換顯示器模式會沒有反應)
+        LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
+        if (lock) s &= ~(LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
+        else s |= (LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
+        SetStyleKeepClient(h, s);
+    }
     if (lock) {
         UpdateLockPos(h);
         SetMoveMenu(h, false);
@@ -1698,7 +1709,7 @@ static void RestoreWindow(HWND h, WinState& ws) {
     ws.ours = false;
     if (IsIconic(h) || IsZoomed(h)) ShowWindow(h, SW_RESTORE);
     LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE) | (LONG_PTR)(WS_CAPTION | WS_THICKFRAME | WS_MAXIMIZEBOX);
-    if (g_locked) s &= ~(LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    if (g_locked && g_lockStyle == 1) s &= ~(LONG_PTR)(WS_THICKFRAME | WS_MAXIMIZEBOX);
     LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
     SetWindowLongPtrW(h, GWL_STYLE, s);
     RECT c = ws.hasClient ? ws.client : DefaultClientRect(h);
@@ -1795,8 +1806,10 @@ static void InitialSync() {
         if (HasCaption(h)) {
             sawCaption = true;
             SaveClient(h, ws);
-            LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
-            g_locked = ((st & WS_THICKFRAME) == 0);
+            if (g_lockStyle == 1) {   // 舊做法的鎖定會移除縮放邊框：依視窗樣式判斷目前是否鎖定
+                LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
+                g_locked = ((st & WS_THICKFRAME) == 0);
+            }
             if (g_locked) EnsureLockState(h);
         } else if (RectIsWorkArea(h)) {
             ws.ours = true;   // 鋪滿工作區的無邊框：視為之前由本工具套用的 (本工具重新啟動)
@@ -1896,12 +1909,15 @@ static void UpdateMouseClip() {
     bool want = false;
     RECT r = { 0, 0, 0, 0 }, wr = { 0, 0, 0, 0 }, mr = { 0, 0, 0, 0 };
     bool iconic = false, caption = false, full = false, exclusive = false, topmost = false;
+    unsigned long wstyle = 0, wexstyle = 0;
     int quns = -1;
     if (gameFg) {
         iconic = IsIconic(fg) != 0;
         caption = HasCaption(fg);
         full = IsFullscreenWindow(fg);
-        topmost = (GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        wstyle = (unsigned long)GetWindowLongPtrW(fg, GWL_STYLE);
+        wexstyle = (unsigned long)GetWindowLongPtrW(fg, GWL_EXSTYLE);
+        topmost = (wexstyle & WS_EX_TOPMOST) != 0;
         if (full) {
             quns = QueryD3DFullscreenState();
             exclusive = (quns == QUNS_RUNNING_D3D_FULL_SCREEN);
@@ -1931,8 +1947,8 @@ static void UpdateMouseClip() {
         RECT sys = { 0, 0, 0, 0 };
         GetClipCursor(&sys);
         char b[480];
-        snprintf(b, sizeof(b), "mouseclip: game foreground, iconic=%d caption=%d fullscreen=%d d3dState=%d exclusive=%d topmost=%d window=[%ld,%ld,%ld,%ld] monitor=[%ld,%ld,%ld,%ld] want=%d active=%d target=[%ld,%ld,%ld,%ld] systemClip=[%ld,%ld,%ld,%ld]",
-                 iconic ? 1 : 0, caption ? 1 : 0, full ? 1 : 0, quns, exclusive ? 1 : 0, topmost ? 1 : 0,
+        snprintf(b, sizeof(b), "mouseclip: game foreground, iconic=%d caption=%d fullscreen=%d d3dState=%d exclusive=%d topmost=%d style=0x%08lX exStyle=0x%08lX locked=%d lockStyle=%d window=[%ld,%ld,%ld,%ld] monitor=[%ld,%ld,%ld,%ld] want=%d active=%d target=[%ld,%ld,%ld,%ld] systemClip=[%ld,%ld,%ld,%ld]",
+                 iconic ? 1 : 0, caption ? 1 : 0, full ? 1 : 0, quns, exclusive ? 1 : 0, topmost ? 1 : 0, wstyle, wexstyle, g_locked ? 1 : 0, g_lockStyle,
                  (long)wr.left, (long)wr.top, (long)wr.right, (long)wr.bottom, (long)mr.left, (long)mr.top, (long)mr.right, (long)mr.bottom,
                  want ? 1 : 0, g_clipActive ? 1 : 0, (long)r.left, (long)r.top, (long)r.right, (long)r.bottom,
                  (long)sys.left, (long)sys.top, (long)sys.right, (long)sys.bottom);
@@ -2043,7 +2059,7 @@ static void SyncWindows() {
         if (g_locked && cap) {
             EnsureLockState(h);   // 持續維持「移動」灰階與鎖定位置記錄
             // 遊戲自己把縮放邊框加回來時，只把樣式改回去 (保持目前的客戶區大小與位置，不會重設視窗大小)
-            if (!g_borderless && !IsIconic(h) && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {
+            if (g_lockStyle == 1 && !g_borderless && !IsIconic(h) && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {
                 LimitPause lp;
                 ApplyLock(h, true);
             }
@@ -2207,15 +2223,51 @@ static void EnforceLow(Target& t) {
 
 static HICON CreateBlueIcon(HICON src);
 
+struct StaleIconCtx { std::vector<DWORD> pids; };
+
+static BOOL CALLBACK RecoverIconEnum(HWND w, LPARAM lp);
+
 static HICON QueryWndIcon(HWND w, WPARAM type) {
     DWORD_PTR res = 0;
     if (!SendMessageTimeoutW(w, WM_GETICON, type, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, &res)) return NULL;
     return (HICON)res;
 }
 
+// 本工具被強制結束時 (例如 build.bat 重新建置)，記憶體裡的原本圖示會遺失，遊戲視窗會一直留著藍色圖示。
+// 所以換成藍色圖示之前，先把「原本的圖示」記在遊戲視窗的視窗屬性上；本工具下次啟動時 (RecoverStaleIcons) 用它換回去
+static const wchar_t* const kPropIconBlue = L"ClientManager.IconBlue";
+static const wchar_t* const kPropIconBig = L"ClientManager.OrigBig";
+static const wchar_t* const kPropIconSmall = L"ClientManager.OrigSmall";
+
+static void ClearIconProps(HWND w) {
+    RemovePropW(w, kPropIconBlue);
+    RemovePropW(w, kPropIconBig);
+    RemovePropW(w, kPropIconSmall);
+}
+
 static bool SetWndIcon(HWND w, WPARAM type, HICON ic) {
     DWORD_PTR res = 0;
     return SendMessageTimeoutW(w, WM_SETICON, type, (LPARAM)ic, SMTO_ABORTIFHUNG | SMTO_BLOCK, 300, &res) != 0;
+}
+
+static BOOL CALLBACK RecoverIconEnum(HWND w, LPARAM lp) {
+    StaleIconCtx* c = (StaleIconCtx*)lp;
+    if (!GetPropW(w, kPropIconBlue)) return TRUE;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(w, &pid);
+    if (std::find(c->pids.begin(), c->pids.end(), pid) == c->pids.end()) return TRUE;
+    SetWndIcon(w, ICON_BIG, (HICON)GetPropW(w, kPropIconBig));
+    SetWndIcon(w, ICON_SMALL, (HICON)GetPropW(w, kPropIconSmall));
+    ClearIconProps(w);
+    return TRUE;
+}
+
+// 上次若被強制結束，遊戲視窗可能還留著藍色圖示：用視窗屬性裡記錄的原本圖示換回去
+static void RecoverStaleIcons() {
+    StaleIconCtx c;
+    c.pids = GetClientPids();
+    if (c.pids.empty()) return;
+    EnumWindows(RecoverIconEnum, (LPARAM)&c);
 }
 
 static void FreeIcons(Target& t) {
@@ -2239,6 +2291,7 @@ static bool RestoreClientIcon(Target& t) {
     }
     bool ok1 = SetWndIcon(w, ICON_BIG, t.restBig);
     bool ok2 = SetWndIcon(w, ICON_SMALL, t.restSmall);
+    if (ok1 && ok2) ClearIconProps(w);
     if (ok1 && ok2) t.iconBlue = false;
     return ok1 && ok2;   // 失敗時保持藍色狀態，下個週期重試
 }
@@ -2283,6 +2336,9 @@ static void SetClientIconBlue(Target& t, bool blue) {
         }
     }
     if (!t.blueBig) return;
+    SetPropW(t.wnd, kPropIconBig, (HANDLE)t.restBig);       // 先記下原本的圖示，再換成藍色
+    SetPropW(t.wnd, kPropIconSmall, (HANDLE)t.restSmall);
+    SetPropW(t.wnd, kPropIconBlue, (HANDLE)1);
     SetWndIcon(t.wnd, ICON_BIG, t.blueBig);
     SetWndIcon(t.wnd, ICON_SMALL, t.blueSmall ? t.blueSmall : t.blueBig);
     t.iconBlue = true;
@@ -2485,7 +2541,12 @@ static void OnMoveSize(bool start, HWND h) {
     std::map<HWND, POINT>::iterator it = g_lockPos.find(h);
     if (it == g_lockPos.end()) return;
     if (start) {
-        PostMessageW(h, WM_KEYDOWN, VK_ESCAPE, 0x00010001);   // 等同在移動中按 Esc：取消移動
+        // 只在使用者按著滑鼠左鍵拖曳時才取消 (遊戲自己改視窗時不去送按鍵給遊戲)；
+        // 先把目前位置當成鎖定位置，這樣遊戲自己移動過視窗之後，取消拖曳時不會被拉回舊位置
+        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
+            UpdateLockPos(h);
+            PostMessageW(h, WM_KEYDOWN, VK_ESCAPE, 0x00010001);   // 等同在移動 / 縮放中按 Esc：取消
+        }
     } else {
         RECT r;
         GetWindowRect(h, &r);
@@ -2539,7 +2600,7 @@ static void ModeCheck() {
             SaveClient(h, ws);
             ApplyBorderless(h);
             ++g_fixCount;
-        } else if (g_locked && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {
+        } else if (g_locked && g_lockStyle == 1 && (GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) {
             LimitPause lp;
             ApplyLock(h, true);
             ++g_fixCount;
@@ -5288,8 +5349,25 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
 
     // 救援參數：ClientManager.exe /resume  只解除遊戲暫停後離開
+    // 結束參數：ClientManager.exe /exit  要求正在執行的本工具正常結束 (讓它先還原遊戲的圖示、優先權與暫停狀態) 後離開；
+    // 給 build.bat 重新建置前使用，避免強制終止造成遊戲狀態殘留
+    if (wcsstr(GetCommandLineW(), L"/exit") != NULL) {
+        HWND other = FindWindowW(L"MabinogiClientManagerClass", NULL);
+        if (other) {
+            DWORD opid = 0;
+            GetWindowThreadProcessId(other, &opid);
+            HANDLE hp = opid ? OpenProcess(SYNCHRONIZE, FALSE, opid) : NULL;
+            PostMessageW(other, WM_CLOSE, 0, 0);
+            if (hp) {
+                WaitForSingleObject(hp, 8000);
+                CloseHandle(hp);
+            }
+        }
+        return 0;
+    }
     if (wcsstr(GetCommandLineW(), L"/resume") != NULL) {
         ResumeAllClients();
+        RecoverStaleIcons();   // 遊戲視窗若還留著藍色圖示也一併換回去
         return 0;
     }
 
@@ -5362,6 +5440,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     ResumeAllClients();   // 上次若被強制關閉，遊戲可能還停在暫停狀態
+    RecoverStaleIcons();  // 以及還留著藍色圖示
     InitialSync();
     SaveAllSettings();
     SetTimer(g_hWnd, 1, g_syncInterval, NULL);

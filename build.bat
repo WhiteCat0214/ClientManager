@@ -16,7 +16,11 @@ exit /B
 :GotAdmin
 cd /d "%~dp0"
 
-taskkill /f /im ClientManager.exe >nul 2>&1
+rem Ask a running ClientManager to exit normally first (so it can restore the game's icon, priority and pause state),
+rem and only force-kill it if it is still running afterwards.
+if exist ClientManager.exe start "" /wait ClientManager.exe /exit
+tasklist /fi "imagename eq ClientManager.exe" 2>nul | find /i "ClientManager.exe" >nul
+if not errorlevel 1 taskkill /f /im ClientManager.exe >nul 2>&1
 timeout /t 1 /nobreak >nul
 
 :: Clean PATH so a stray link.exe (e.g. from Git) cannot hijack the MSVC linker
