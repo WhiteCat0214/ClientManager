@@ -49,7 +49,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 ## 選單功能
 
-<img width="226" height="336" alt="右鍵選單一覽" src="https://github.com/user-attachments/assets/ab58c4c5-3c69-4f47-ab35-14a3bcdcd1be" />
+<img width="226" height="336" alt="右鍵選單一覽" src="https://github.com/user-attachments/assets/19c16a72-9cf4-4a88-a9c5-9d2174acc6d9" />
 
 ### 切換無邊框 / 還原
 
