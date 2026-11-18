@@ -4,9 +4,10 @@
 // Single source of the application version, used by ClientManager.cpp (About window)
 // and ClientManager.rc (file properties). Do not change unless a new release is requested.
 #define APP_VERSION_MAJOR 1
-#define APP_VERSION_MINOR 0
-#define APP_VERSION_STR "1.0"
-#define APP_VERSION_WSTR L"1.0"
+#define APP_VERSION_MINOR 1
+#define APP_VERSION_PATCH 0
+#define APP_VERSION_STR "1.1.0"
+#define APP_VERSION_WSTR L"1.1.0"
 #define APP_URL_WSTR L"https://github.com/WhiteCat0214/ClientManager"
 
 #endif

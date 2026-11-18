@@ -14,7 +14,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 設計上以效率與節能為主軸，盡量不佔用過高的記憶體與 CPU：沒有啟用的功能不會執行，遊戲未啟動時幾乎不做任何事，避免影響遊戲本身的效能。
 
-程式是原生的 Windows 應用程式 (C++)，只針對 `Client.exe` 運作並常駐於通知區域，不需要另外安裝 Visual C++ 執行階段；設定存放在同一個資料夾的 `ClientManager.ini`，介面支援繁體中文、简体中文、English、日本語。
+程式是原生的 Windows 應用程式 (C++)，只針對 `Client.exe` 運作並常駐於通知區域，不需要另外安裝 Visual C++ 執行階段；設定存放在同一個資料夾的 `ClientManager.ini`，介面支援繁體中文、简体中文、English、日本語、한국어。
 
 ## 主要功能
 
@@ -35,7 +35,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 ## 下載與建置
 
-- **下載：** 到本倉庫的 [Releases](https://github.com/WhiteCat0214/ClientManager/releases) 頁面下載壓縮檔，內含 `ClientManager.exe` 與含完整說明的 `ClientManager.ini`。
+- **下載：** 到本倉庫的 [Releases](https://github.com/WhiteCat0214/ClientManager/releases) 頁面下載壓縮檔，內含 `ClientManager.exe` 與含完整說明的預設設定檔 `ClientManager.default.ini` (壓縮檔不含 `ClientManager.ini`，避免覆蓋既有的設定)。
 - **自行建置：** 需要 Visual Studio 2022（工作負載：使用 C++ 的桌面開發）或 Build Tools。雙擊 `build.bat`（會自動要求管理員權限），完成後得到 `ClientManager.exe`。
 
 > **測試環境：** 本程式僅在 Windows 10 (22H2) 平台上進行建置及功能測試，且僅在台服遊戲端測試，不保證適用於其他 Windows 版本及其他國家版本的遊戲端。
@@ -43,7 +43,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 ## 啟動
 
 - 執行 `ClientManager.exe`（需要管理員權限），程式會常駐在右下角的通知區域。
-- 在通知區域的圖示上按右鍵開啟選單；連點兩下圖示的動作可在選單設定 (預設為切換無邊框 / 還原)。
+- 在通知區域的圖示上按右鍵開啟選單；「設定...」可開啟設定視窗 (左側選單分類：遊戲視窗、優先權 / 親和性、CPU限制、效能監控、其他、關於)，涵蓋選單與設定檔的所有項目；連點兩下圖示的動作可在設定視窗或選單設定 (預設為開啟設定頁面)。
 - 把滑鼠停在圖示上，會顯示遊戲目前實際的 CPU / GPU / I/O 優先權、CPU 核心，以及是否正在限制中。
 - 使用前請先手動啟動一次遊戲，工具才能找到 `Client.exe` 並記住它的路徑與啟動參數。
 
@@ -119,7 +119,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 <img width="408" height="37" alt="視窗監控" src="https://github.com/user-attachments/assets/ea190a4a-f13c-4ea9-bb10-d0f4de2732c6" />
 
-選單有三項：「啟用監控」、「鎖定位置 (滑鼠穿透)」、「監控設定...」。
+選單有兩項：「啟用監控」、「鎖定位置 (滑鼠穿透)」；其他設定在「設定...」的「效能監控」頁。
 
 在遊戲畫面上顯示文字疊加視窗，項目依序為 CPU、RAM、GPU、VRAM、FPS、Latency (標籤固定為英文)：
 
@@ -134,7 +134,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 百分比為整數時不顯示小數，否則顯示到小數第一位 (例如 8% 與 12.3%)；資料不可用時顯示 `--`。
 
-**監控設定視窗：**
+**「設定...」的「效能監控」頁：**
 
 - 啟用監控 (最上方)
 - 顯示項目：CPU / RAM / VRAM 可分別選擇顯示「比例」與「實際值」，預設只顯示比例；右側「顯示順序」框可用滑鼠拖曳調整
@@ -148,9 +148,13 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 ### 連點兩下圖示的動作
 
-- 切換無邊框 / 還原 (預設)
+- 開啟設定頁面 (預設)
+- 切換無邊框 / 還原
 - 啟用 / 關閉 CPU 限制
 - 啟用 / 關閉監控
+- 隱藏 / 顯示遊戲工作列
+
+除了「開啟設定頁面」以外，切換後會在通知區域圖示上方短暫顯示該項目已啟用或已關閉。
 
 ### 強制重啟 / 結束遊戲
 
@@ -166,7 +170,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 ### 語言
 
-自動選擇 / 繁體中文 / 简体中文 / 英文 / 日本語。優先讀設定檔的語言；設定為自動時依系統語系選擇。
+自動選擇 / 繁體中文 / 简体中文 / 英文 / 日本語 / 한국어。優先讀設定檔的語言；設定為自動時依系統語系選擇。
 
 ### 關於
 
@@ -175,7 +179,7 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 - 複製：立即複製目前的記錄
 - 停止更新 / 自動更新：手動暫停或恢復更新
 - 在記錄區塊內選取文字、或捲動捲軸時也會暫停更新，捲回最上方 / 最左邊並取消選取後才恢復自動更新。
-- 診斷記錄只在關於視窗開啟期間收集，關閉視窗就停止。
+- 診斷記錄只在設定視窗的「關於」頁顯示期間收集，離開該頁就停止。
 
 ### 結束程式
 
@@ -183,8 +187,8 @@ GitHub：<https://github.com/WhiteCat0214/ClientManager>
 
 `ClientManager.ini` (與 `ClientManager.exe` 同一個資料夾)，每個數值都標註了功能、可調整範圍與預設值。程式會記住選單設定、遊戲路徑與啟動參數 (官方網頁登入器帶入的 `/N:` `/V:` 臨時登入帳號密碼與 `/T:` 參數不會被儲存)。(設定檔內的說明文字為繁體中文。)
 
-- Release 壓縮檔內已附上含完整說明的 `ClientManager.ini`。
-- 倉庫內含完整說明的預設檔名為 `ClientManager.default.ini`；自行建置時，複製為 `ClientManager.ini` 放在 exe 旁即可。沒有設定檔時，程式會使用預設值並自動建立 (不含說明文字)。
+- Release 壓縮檔與倉庫內附的是含完整說明的預設檔 `ClientManager.default.ini`，程式不會讀取它；想使用時，複製 (或改名) 為 `ClientManager.ini` 放在 exe 旁即可。
+- 沒有 `ClientManager.ini` 時，程式會使用預設值並自動建立 (不含說明文字)。升級新版時直接覆蓋 `ClientManager.exe` 即可，原本的 `ClientManager.ini` 會保留；新版新增的設定項目請參考 `ClientManager.default.ini`。
 - 設定檔會記錄遊戲路徑與啟動參數；官方網頁登入器帶入的 `/N:`、`/V:` (臨時登入帳號密碼) 與 `/T:` 參數不會被儲存。分享或上傳設定檔前，仍建議先確認內容。
 
 ## 其他

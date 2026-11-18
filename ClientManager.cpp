@@ -60,7 +60,7 @@ enum {
     ID_TOGGLE = 1001, ID_RESET, ID_LOCK,
     ID_CPU_ENABLE, ID_CPU_ALW, ID_CPU_MIN, ID_CPU_BG,
     ID_ECO,
-    ID_RESTART_CLIENT, ID_RESTART_LAUNCHER, ID_TERM, ID_EXIT, ID_ABOUT, ID_HIDE_TASKBAR, ID_MOUSE_CLIP,
+    ID_RESTART_CLIENT, ID_RESTART_LAUNCHER, ID_TERM, ID_EXIT, ID_SETTINGS, ID_HIDE_TASKBAR, ID_MOUSE_CLIP,
     ID_RATIO_BASE = 1100,
     ID_PRIO_CPU_BASE = 1200,   // + 等級 1..6
     ID_GPU_BASE = 1240,        // + 等級 1..6
@@ -68,10 +68,9 @@ enum {
     ID_SHOWTIP = 1270,
     ID_AFF_ALL = 1290, ID_AFF_P, ID_AFF_PNOHT, ID_AFF_E,
     ID_AFFCORE_BASE = 1300,    // + 邏輯核心編號 0..63
-    ID_DBL_BASE = 1450,        // + 連點兩下圖示的動作 0..2
-    ID_LANG_BASE = 1400,       // + 語言 0..4 (自動 / 繁中 / 簡中 / 英文 / 日文)
-    ID_OV_ENABLE = 1500,       // 效能監控：啟用 / 設定視窗 / 鎖定位置
-    ID_OV_SETTINGS,
+    ID_DBL_BASE = 1450,        // + 連點兩下圖示的動作 0..4
+    ID_LANG_BASE = 1400,       // + 語言 0..5 (自動 / 繁中 / 簡中 / 英文 / 日文 / 韓文)
+    ID_OV_ENABLE = 1500,       // 效能監控：啟用 / 鎖定位置
     ID_OV_LOCK,
     ID_OV_LAST = 1599
 };
@@ -141,7 +140,7 @@ static std::atomic<DWORD> g_prioErr(0);          // 最近一次設定 CPU 優�
 static bool g_throttleOn = false;                // 通知區域提示用：CPU 限制目前是否作動
 static bool g_showTip = true;                    // 是否在工具提示顯示遊戲目前的優先權 / 親和性
 static std::atomic<int> g_langSetting(0);        // 語言設定 (UL_*，0 = 自動)
-static std::atomic<int> g_lang(1);               // 實際使用的語言 (1..4)
+static std::atomic<int> g_lang(1);               // 實際使用的語言 (1..5)
 
 // ---- 效能監控 (疊加視窗) 設定與共用狀態 ----
 static std::atomic<bool> g_ovEnabled(false);
@@ -168,13 +167,14 @@ static std::atomic<DWORD> g_fpsPid(0);
 static HWND g_gameHwnd = NULL;
 static HWND g_ovHwnd = NULL;
 static HANDLE g_monWake = NULL;
-static bool g_monDlgOpen = false;                   // 監控設定視窗是否開啟中 (開啟時固定顯示監控畫面做預覽)
+static bool g_monDlgOpen = false;                   // 設定視窗是否開啟中 (開啟期間，監控的位置與選項要等按下「確定」才寫入 ini)
+static bool g_monPreview = false;                   // 設定視窗正顯示「效能監控」頁 (固定顯示監控畫面做預覽)
 static HWND g_monDlgHwnd = NULL;
 static void UpdateOverlayVisibility();
 static std::atomic<bool> g_ovLatency(true);         // 顯示網路延遲
 static std::atomic<int> g_ovCpuMethod(0);           // CPU 使用率算法：0 = PDH 效能計數器 (預設)，1 = CPU 週期數，2 = 行程 CPU 時間
 static std::atomic<int> g_ovLatMethod(0);           // Latency 取樣方式：0 = 最近一次樣本值 (預設)，1 = 平滑往返時間
-static std::atomic<int> g_dblAction(0);             // 連點兩下圖示的動作：0 = 切換無邊框 / 還原，1 = 啟用 / 關閉 CPU 限制，2 = 啟用 / 關閉監控
+static std::atomic<int> g_dblAction(0);             // 連點兩下圖示的動作：0 = 開啟設定頁面 (預設)，1 = 切換無邊框 / 還原，2 = 啟用 / 關閉 CPU 限制，3 = 啟用 / 關閉監控，4 = 隱藏 / 顯示遊戲工作列
 static int g_regrayLeft = 0;                        // 「移動」變灰的連續補強次數
 static bool g_noGameDlgOpen = false;
 static std::wstring g_ovSeparator;                  // 橫式的分隔文字 (空白 = 只用一個空格分隔)
@@ -258,9 +258,10 @@ static bool FileExists(const std::wstring& p) {
 }
 
 // ---------------------------------------------------------------------------
-//  多語系：繁體中文 / 簡體中文 / 英文 / 日文
+//  多語系：繁體中文 / 簡體中文 / 英文 / 日文 / 韓文
 // ---------------------------------------------------------------------------
-enum UiLang { UL_AUTO = 0, UL_ZHTW = 1, UL_ZHCN = 2, UL_EN = 3, UL_JA = 4 };
+enum UiLang { UL_AUTO = 0, UL_ZHTW = 1, UL_ZHCN = 2, UL_EN = 3, UL_JA = 4, UL_KO = 5 };
+static const int kLangCount = 5;   // 可選的語言數 (不含自動)
 
 enum StrId {
     S_NO_GAME,
@@ -344,8 +345,7 @@ enum StrId {
     S_DLG_COLOR_BAD,
     S_DLG_OK,
     S_DLG_CANCEL,
-    S_MON_SETTINGS,
-    S_DLG_MON_TITLE,
+    S_SET_TITLE,
     S_DLG_APPLY,
     S_LBL_TEXTCOLOR,
     S_LBL_OUTLINECOLOR,
@@ -372,7 +372,7 @@ enum StrId {
     S_LAT_SAMPLE,
     S_LAT_SMOOTH,
     S_METHOD_EST,
-    S_M_ABOUT,
+    S_M_SETTINGS,
     S_ABOUT_TITLE,
     S_ABOUT_GROUP,
     S_ABOUT_TEXT,
@@ -382,134 +382,173 @@ enum StrId {
     S_M_MOUSE_CLIP,
     S_TIP_WINDOWED,
     S_TIP_FULLSCREEN,
+    S_CAT_WINDOW,
+    S_CAT_PRIO,
+    S_CAT_CPU,
+    S_CAT_OTHER,
+    S_BORDERLESS,
+    S_TOAST_ON,
+    S_TOAST_OFF,
+    S_DBL_SETTINGS,
+    S_DBL_TASKBAR,
+    S_G_WINDOW,
+    S_G_MOUSE,
+    S_G_PRIO,
+    S_LOCKSTYLE,
+    S_LOCKSTYLE_0,
+    S_LOCKSTYLE_1,
+    S_NOTE_WINDOWED,
+    S_CLIP_MARGIN,
+    S_CLIP_RANGE,
+    S_CLIP_BL,
+    S_PRIO_UNSET,
     S_M_EXIT,
     S__COUNT
 };
 
-static const wchar_t* const kStr[S__COUNT][4] = {
-    { L"找不到執行中的遊戲 (Client.exe)！\n需先手動執行一次遊戲，才能使用此功能。", L"找不到正在运行的游戏 (Client.exe)！\n需要先手动运行一次游戏，才能使用此功能。", L"No running game (Client.exe) found!\nStart the game manually at least once before using this feature.", L"実行中のゲーム (Client.exe) が見つかりません。\nこの機能を使うには、先に一度ゲームを手動で起動してください。" },   // NO_GAME
-    { L"找不到執行中的遊戲 (Client.exe)！\n需先手動執行一次遊戲，工具才能記住遊戲路徑。", L"找不到正在运行的游戏 (Client.exe)！\n需要先手动运行一次游戏，工具才能记住游戏路径。", L"No running game (Client.exe) found!\nStart the game manually once so the tool can remember its path.", L"実行中のゲーム (Client.exe) が見つかりません。\n一度ゲームを手動で起動して、パスを記憶させてください。" },   // NO_GAME_PATH
-    { L"找不到同目錄下的遊戲啟動器 (Mabinogi.exe)！\n需先手動執行遊戲一次，或確認遊戲資料夾是否完整。", L"找不到同目录下的游戏启动器 (Mabinogi.exe)！\n需要先手动运行一次游戏，或确认游戏文件夹是否完整。", L"Game launcher (Mabinogi.exe) not found in the same folder!\nStart the game manually once, or check that the game folder is intact.", L"同じフォルダーにゲームランチャー (Mabinogi.exe) が見つかりません。\n一度ゲームを手動で起動するか、ゲームフォルダーを確認してください。" },   // NO_LAUNCHER
-    { L"重啟遊戲失敗 (錯誤碼 %lu)", L"重启游戏失败 (错误码 %lu)", L"Failed to restart the game (error code %lu)", L"ゲームの再起動に失敗しました (エラーコード %lu)" },   // RESTART_FAIL
-    { L"至少需要選擇一個核心！", L"至少需要选择一个核心！", L"At least one core must be selected!", L"少なくとも 1 つのコアを選択してください。" },   // NEED_ONE_CORE
-    { L"Mabinogi Client Manager 已經在背景執行中！", L"Mabinogi Client Manager 已经在后台运行！", L"Mabinogi Client Manager is already running in the background!", L"Mabinogi Client Manager は既にバックグラウンドで実行中です。" },   // ALREADY_RUNNING
-    { L"偵測到 CPU 核心配置與設定檔記錄的不同 (可能更換了電腦或 CPU)，\n已重設 CPU 親和性，將在遊戲啟動時重新讀取遊戲目前的設定。", L"检测到 CPU 核心配置与配置文件记录的不同 (可能更换了电脑或 CPU)，\n已重置 CPU 亲和性，将在游戏启动时重新读取游戏当前的设置。", L"The CPU core layout differs from the one saved in the settings file (the PC or CPU may have changed).\nCPU affinity has been reset and will be re-read from the game the next time it starts.", L"CPU のコア構成が設定ファイルの記録と異なります (PC または CPU が変更された可能性があります)。\nCPU アフィニティをリセットしました。次回ゲーム起動時に現在の設定を読み込みます。" },   // AFF_RESET
-    { L" (限制中)", L" (限制中)", L" (Limiting)", L" (制限中)" },   // TIP_LIMITING
-    { L"遊戲未執行", L"游戏未运行", L"Game not running", L"ゲーム未実行" },   // TIP_NOGAME
-    { L"目前的遊戲優先權 / 親和性", L"当前的游戏优先级 / 亲和性", L"Current game priority / affinity", L"現在のゲームの優先度 / アフィニティ" },   // TIP_HEADER
-    { L"CPU: %s", L"CPU: %s", L"CPU: %s", L"CPU: %s" },   // TIP_CPU
-    { L"GPU: %s", L"GPU: %s", L"GPU: %s", L"GPU: %s" },   // TIP_GPU
-    { L"I/O: %s", L"I/O: %s", L"I/O: %s", L"I/O: %s" },   // TIP_IO
-    { L"核心: %s", L"核心: %s", L"Cores: %s", L"コア: %s" },   // TIP_CORES
-    { L"低 (Idle)", L"低 (Idle)", L"Idle", L"低 (Idle)" },   // PRIO_1
-    { L"低於標準", L"低于标准", L"Below normal", L"通常以下" },   // PRIO_2
-    { L"標準", L"标准", L"Normal", L"通常" },   // PRIO_3
-    { L"高於標準", L"高于标准", L"Above normal", L"通常以上" },   // PRIO_4
-    { L"高", L"高", L"High", L"高" },   // PRIO_5
-    { L"即時 (Realtime)", L"实时 (Realtime)", L"Realtime", L"リアルタイム (Realtime)" },   // PRIO_6
-    { L"極低", L"极低", L"Very low", L"非常に低い" },   // IO_1
-    { L"低", L"低", L"Low", L"低" },   // IO_2
-    { L"正常", L"正常", L"Normal", L"通常" },   // IO_3
-    { L"高", L"高", L"High", L"高" },   // IO_4
-    { L"切換無邊框 / 還原", L"切换无边框 / 还原", L"Toggle borderless / restore", L"ボーダーレス切替 / 元に戻す" },   // M_TOGGLE
-    { L"鎖定視窗大小及位置", L"锁定窗口大小及位置", L"Lock window size and position", L"ウィンドウのサイズと位置を固定" },   // M_LOCK
-    { L"重置視窗大小和位置", L"重置窗口大小和位置", L"Reset window size and position", L"ウィンドウのサイズと位置をリセット" },   // M_RESET
-    { L"遊戲優先權 / 親和性", L"游戏优先级 / 亲和性", L"Game priority / affinity", L"ゲームの優先度 / アフィニティ" },   // M_GAMEPRIO
-    { L"CPU優先權", L"CPU优先级", L"CPU priority", L"CPU 優先度" },   // M_CPUPRIO
-    { L"CPU親和性", L"CPU亲和性", L"CPU affinity", L"CPU アフィニティ" },   // M_CPUAFF
-    { L"GPU優先權", L"GPU优先级", L"GPU priority", L"GPU 優先度" },   // M_GPUPRIO
-    { L"於工具提示顯示目前狀態", L"在工具提示中显示当前状态", L"Show current status in tooltip", L"ツールチップに現在の状態を表示" },   // M_TIPSHOW
-    { L"I/O優先權", L"I/O优先级", L"I/O priority", L"I/O 優先度" },   // M_IOPRIO
-    { L"全選", L"全选", L"Select all", L"すべて選択" },   // AFF_ALL
-    { L"僅大核 (P-core)", L"仅大核 (P-core)", L"P-cores only", L"P コアのみ" },   // AFF_P
-    { L"僅大核 (P-core) 不含%s", L"仅大核 (P-core) 不含%s", L"P-cores only (no %s)", L"P コアのみ (%s なし)" },   // AFF_PNOHT
-    { L"僅實體核心 (不含%s)", L"仅物理核心 (不含%s)", L"Physical cores only (no %s)", L"物理コアのみ (%s なし)" },   // AFF_NOHT
-    { L"僅小核 (E-core)", L"仅小核 (E-core)", L"E-cores only", L"E コアのみ" },   // AFF_E
-    { L"核心 %d %s", L"核心 %d %s", L"Core %d %s", L"コア %d %s" },   // CORE_ITEM
-    { L"(大核 P-core)", L"(大核 P-core)", L"(P-core)", L"(P コア)" },   // CORE_P
-    { L"(大核 P-core) %s", L"(大核 P-core) %s", L"(P-core) %s", L"(P コア) %s" },   // CORE_P_HT
-    { L"(小核 E-core)", L"(小核 E-core)", L"(E-core)", L"(E コア)" },   // CORE_E
-    { L"(小核 E-core) %s", L"(小核 E-core) %s", L"(E-core) %s", L"(E コア) %s" },   // CORE_E_HT
-    { L"(實體核心)", L"(物理核心)", L"(Physical core)", L"(物理コア)" },   // CORE_PHYS
-    { L"(%s)", L"(%s)", L"(%s)", L"(%s)" },   // CORE_HT
-    { L"超執行緒", L"超线程", L"Hyper-Threading", L"ハイパースレッディング" },   // SMT_INTEL
-    { L"超執行緒", L"超线程", L"SMT", L"SMT" },   // SMT_OTHER
-    { L"限制CPU使用率", L"限制CPU使用率", L"Limit CPU usage", L"CPU 使用率を制限" },   // M_LIMIT
-    { L"啟用CPU限制", L"启用CPU限制", L"Enable CPU limit", L"CPU 制限を有効にする" },   // M_ENABLE
-    { L"限制時同時降低優先權 / 節能模式", L"限制时同时降低优先级 / 节能模式", L"Lower priority / efficiency mode while limiting", L"制限中は優先度を下げる / 省電力モード" },   // M_ECO
-    { L"生效條件", L"生效条件", L"When to apply", L"適用条件" },   // M_COND
-    { L"永遠限制 CPU 使用率", L"始终限制 CPU 使用率", L"Always limit CPU usage", L"常に CPU 使用率を制限" },   // C_ALWAYS
-    { L"僅在視窗最小化時生效", L"仅在窗口最小化时生效", L"Only when the window is minimized", L"ウィンドウ最小化時のみ" },   // C_MIN
-    { L"僅在視窗最小化或於背景執行時生效", L"仅在窗口最小化或在后台运行时生效", L"Only when minimized or in the background", L"最小化またはバックグラウンド時のみ" },   // C_BG
-    { L"限制比例", L"限制比例", L"Limit ratio", L"制限割合" },   // M_RATIO
-    { L"強制重啟 / 結束遊戲", L"强制重启 / 结束游戏", L"Force restart / quit game", L"ゲームの強制再起動 / 終了" },   // M_RESTARTMENU
-    { L"重啟遊戲 (Client.exe)", L"重启游戏 (Client.exe)", L"Restart game (Client.exe)", L"ゲームを再起動 (Client.exe)" },   // M_RESTART_CLIENT
-    { L"重啟遊戲 (Mabinogi.exe)", L"重启游戏 (Mabinogi.exe)", L"Restart game (Mabinogi.exe)", L"ゲームを再起動 (Mabinogi.exe)" },   // M_RESTART_LAUNCHER
-    { L"強制結束遊戲", L"强制结束游戏", L"Force quit game", L"ゲームを強制終了" },   // M_TERM
-    { L"語言", L"语言", L"Language", L"言語" },   // M_LANG
-    { L"自動選擇", L"自动选择", L"Auto", L"自動選択" },   // L_AUTO
-    { L"(限制中)", L"(限制中)", L"(Limited)", L"(制限中)" },   // OV_LIMITING
-    { L"效能監控", L"性能监控", L"Performance monitor", L"パフォーマンスモニター" },   // M_MON
-    { L"啟用監控", L"启用监控", L"Enable monitor", L"モニターを有効にする" },   // MON_ENABLE
-    { L"顯示項目", L"显示项目", L"Items", L"表示項目" },   // MON_ITEMS
-    { L"比例", L"比例", L"Percentage", L"割合" },   // MON_PCT
-    { L"實際值 (GHz)", L"实际值 (GHz)", L"Actual value (GHz)", L"実測値 (GHz)" },   // MON_ACTUAL_GHZ
-    { L"實際值 (MB)", L"实际值 (MB)", L"Actual value (MB)", L"実測値 (MB)" },   // MON_ACTUAL_MB
-    { L"排列方式", L"排列方式", L"Layout", L"レイアウト" },   // MON_LAYOUT
-    { L"直式 (每行一項)", L"竖式 (每行一项)", L"Vertical (one item per line)", L"縦 (1 行に 1 項目)" },   // MON_VERT
-    { L"橫式 (以文字分隔)", L"横式 (以文字分隔)", L"Horizontal (separated by text)", L"横 (文字で区切る)" },   // MON_HORZ
-    { L"鎖定位置 (滑鼠穿透)", L"锁定位置 (鼠标穿透)", L"Lock position (click-through)", L"位置を固定 (クリックを透過)" },   // MON_LOCK
-    { L"更新頻率", L"更新频率", L"Update interval", L"更新間隔" },   // MON_INTERVAL
-    { L"外觀", L"外观", L"Appearance", L"外観" },   // MON_STYLE
-    { L"字體大小", L"字体大小", L"Font size", L"フォントサイズ" },   // MON_FONTSIZE
-    { L"不透明度", L"不透明度", L"Opacity", L"不透明度" },   // MON_OPACITY
-    { L"鎖定時無背景", L"锁定时无背景", L"No background when locked", L"固定時は背景なし" },   // MON_LOCKNOBG
-    { L"重置位置", L"重置位置", L"Reset position", L"位置をリセット" },   // MON_RESETPOS
-    { L"色碼格式不正確，請輸入 6 位數的 HEX (0-9、A-F)。", L"色码格式不正确，请输入 6 位 HEX (0-9、A-F)。", L"Invalid color code. Enter 6 hex digits (0-9, A-F).", L"カラーコードの形式が正しくありません。16 進数 6 桁 (0-9, A-F) で入力してください。" },   // DLG_COLOR_BAD
-    { L"確定", L"确定", L"OK", L"OK" },   // DLG_OK
-    { L"取消", L"取消", L"Cancel", L"キャンセル" },   // DLG_CANCEL
-    { L"監控設定...", L"监控设置...", L"Monitor settings...", L"モニター設定..." },   // MON_SETTINGS
-    { L"監控設定", L"监控设置", L"Monitor settings", L"モニター設定" },   // DLG_MON_TITLE
-    { L"套用", L"应用", L"Apply", L"適用" },   // DLG_APPLY
-    { L"字體顏色", L"字体颜色", L"Text color", L"文字の色" },   // LBL_TEXTCOLOR
-    { L"文字外框顏色", L"文字外框颜色", L"Text outline color", L"文字の縁取りの色" },   // LBL_OUTLINECOLOR
-    { L"背景顏色", L"背景颜色", L"Background color", L"背景色" },   // LBL_BGCOLOR
-    { L"只在遊戲前景時顯示 (僅在設定視窗關閉後生效)", L"仅在游戏前台时显示 (仅在设置窗口关闭后生效)", L"Show only when the game is in the foreground (takes effect after this window is closed)", L"ゲームが前面のときのみ表示 (この画面を閉じた後に有効)" },   // MON_FGONLY_DLG
-    { L"每 0.5 秒", L"每 0.5 秒", L"Every 0.5 s", L"0.5 秒ごと" },   // MON_EVERY_05
-    { L"每 1 秒", L"每 1 秒", L"Every 1 s", L"1 秒ごと" },   // MON_EVERY_1
-    { L"每 2 秒", L"每 2 秒", L"Every 2 s", L"2 秒ごと" },   // MON_EVERY_2
-    { L"連點兩下圖示的動作", L"双击图标的动作", L"Double-click action", L"ダブルクリックの動作" },   // M_DBLCLICK
-    { L"啟用CPU限制 / 關閉CPU限制", L"启用CPU限制 / 关闭CPU限制", L"Enable / disable CPU limit", L"CPU 制限の有効 / 無効を切り替え" },   // DBL_CPU
-    { L"啟用監控 / 關閉監控", L"启用监控 / 关闭监控", L"Enable / disable monitor", L"モニターの有効 / 無効を切り替え" },   // DBL_MON
-    { L"重啟 Client.exe", L"重启 Client.exe", L"Restart Client.exe", L"Client.exe を再起動" },   // DLG_RESTART_CLIENT
-    { L"重啟 Mabinogi.exe", L"重启 Mabinogi.exe", L"Restart Mabinogi.exe", L"Mabinogi.exe を再起動" },   // DLG_RESTART_LAUNCHER
-    { L"關閉", L"关闭", L"Close", L"閉じる" },   // DLG_CLOSE
-    { L"顯示設定", L"显示设置", L"Display settings", L"表示設定" },   // MON_DISPLAY
-    { L"分隔文字", L"分隔文字", L"Separator", L"区切り文字" },   // MON_SEPARATOR
-    { L"顯示順序 (拖曳排序)", L"显示顺序 (拖动排序)", L"Order (drag to sort)", L"表示順序 (ドラッグ)" },   // MON_ORDER
-    { L"CPU 使用率算法", L"CPU 使用率算法", L"CPU usage method", L"CPU 使用率の算出方法" },   // MON_METHOD
-    { L"週期法 (CPU 週期數)", L"周期法 (CPU 周期数)", L"Cycle count", L"サイクル数" },   // METHOD_CYC
-    { L"時間法 (行程 CPU 時間)", L"时间法 (进程 CPU 时间)", L"Process CPU time", L"プロセス CPU 時間" },   // METHOD_TIME
-    { L"診斷記錄", L"诊断记录", L"Diagnostic log", L"診断ログ" },   // MON_DEBUG
-    { L"複製", L"复制", L"Copy", L"コピー" },   // DLG_COPY
-    { L"Latency 取樣方式", L"Latency 取样方式", L"Latency sampling", L"Latency の取得方法" },   // MON_LATMETHOD
-    { L"最近一次樣本值 (預設)", L"最近一次样本值 (默认)", L"Latest sample (default)", L"最新のサンプル値 (既定)" },   // LAT_SAMPLE
-    { L"平滑往返時間", L"平滑往返时间", L"Smoothed round-trip time", L"平滑化した往復時間" },   // LAT_SMOOTH
-    { L"估算 (行程時間 × 系統 Utility/Time)", L"估算 (进程时间 × 系统 Utility/Time)", L"Estimate (process time x system utility/time)", L"推定 (プロセス時間 × システム Utility/Time)" },   // METHOD_EST
-    { L"關於...", L"关于...", L"About...", L"バージョン情報..." },   // M_ABOUT
-    { L"關於", L"关于", L"About", L"バージョン情報" },   // ABOUT_TITLE
-    { L"程式說明", L"程序说明", L"Description", L"プログラムの説明" },   // ABOUT_GROUP
+static const wchar_t* const kStr[S__COUNT][5] = {
+    { L"找不到執行中的遊戲 (Client.exe)！\n需先手動執行一次遊戲，才能使用此功能。", L"找不到正在运行的游戏 (Client.exe)！\n需要先手动运行一次游戏，才能使用此功能。", L"No running game (Client.exe) found!\nStart the game manually at least once before using this feature.", L"実行中のゲーム (Client.exe) が見つかりません。\nこの機能を使うには、先に一度ゲームを手動で起動してください。", L"실행 중인 게임 (Client.exe)을 찾을 수 없습니다!\n이 기능을 사용하려면 먼저 게임을 한 번 직접 실행해 주세요." },   // NO_GAME
+    { L"找不到執行中的遊戲 (Client.exe)！\n需先手動執行一次遊戲，工具才能記住遊戲路徑。", L"找不到正在运行的游戏 (Client.exe)！\n需要先手动运行一次游戏，工具才能记住游戏路径。", L"No running game (Client.exe) found!\nStart the game manually once so the tool can remember its path.", L"実行中のゲーム (Client.exe) が見つかりません。\n一度ゲームを手動で起動して、パスを記憶させてください。", L"실행 중인 게임 (Client.exe)을 찾을 수 없습니다!\n도구가 게임 경로를 기억할 수 있도록 게임을 한 번 직접 실행해 주세요." },   // NO_GAME_PATH
+    { L"找不到同目錄下的遊戲啟動器 (Mabinogi.exe)！\n需先手動執行遊戲一次，或確認遊戲資料夾是否完整。", L"找不到同目录下的游戏启动器 (Mabinogi.exe)！\n需要先手动运行一次游戏，或确认游戏文件夹是否完整。", L"Game launcher (Mabinogi.exe) not found in the same folder!\nStart the game manually once, or check that the game folder is intact.", L"同じフォルダーにゲームランチャー (Mabinogi.exe) が見つかりません。\n一度ゲームを手動で起動するか、ゲームフォルダーを確認してください。", L"같은 폴더에서 게임 런처 (Mabinogi.exe)를 찾을 수 없습니다!\n게임을 한 번 직접 실행하거나 게임 폴더가 온전한지 확인해 주세요." },   // NO_LAUNCHER
+    { L"重啟遊戲失敗 (錯誤碼 %lu)", L"重启游戏失败 (错误码 %lu)", L"Failed to restart the game (error code %lu)", L"ゲームの再起動に失敗しました (エラーコード %lu)", L"게임 재시작에 실패했습니다 (오류 코드 %lu)" },   // RESTART_FAIL
+    { L"至少需要選擇一個核心！", L"至少需要选择一个核心！", L"At least one core must be selected!", L"少なくとも 1 つのコアを選択してください。", L"코어를 하나 이상 선택해야 합니다!" },   // NEED_ONE_CORE
+    { L"Mabinogi Client Manager 已經在背景執行中！", L"Mabinogi Client Manager 已经在后台运行！", L"Mabinogi Client Manager is already running in the background!", L"Mabinogi Client Manager は既にバックグラウンドで実行中です。", L"Mabinogi Client Manager가 이미 백그라운드에서 실행 중입니다!" },   // ALREADY_RUNNING
+    { L"偵測到 CPU 核心配置與設定檔記錄的不同 (可能更換了電腦或 CPU)，\n已重設 CPU 親和性，將在遊戲啟動時重新讀取遊戲目前的設定。", L"检测到 CPU 核心配置与配置文件记录的不同 (可能更换了电脑或 CPU)，\n已重置 CPU 亲和性，将在游戏启动时重新读取游戏当前的设置。", L"The CPU core layout differs from the one saved in the settings file (the PC or CPU may have changed).\nCPU affinity has been reset and will be re-read from the game the next time it starts.", L"CPU のコア構成が設定ファイルの記録と異なります (PC または CPU が変更された可能性があります)。\nCPU アフィニティをリセットしました。次回ゲーム起動時に現在の設定を読み込みます。", L"CPU 코어 구성이 설정 파일에 기록된 것과 다릅니다 (PC 또는 CPU가 바뀌었을 수 있습니다).\nCPU 선호도(Affinity)를 초기화했으며, 다음에 게임이 시작될 때 게임의 현재 설정을 다시 읽어 옵니다." },   // AFF_RESET
+    { L" (限制中)", L" (限制中)", L" (Limiting)", L" (制限中)", L" (제한 중)" },   // TIP_LIMITING
+    { L"遊戲未執行", L"游戏未运行", L"Game not running", L"ゲーム未実行", L"게임 실행 안 됨" },   // TIP_NOGAME
+    { L"目前的遊戲優先權 / 親和性", L"当前的游戏优先级 / 亲和性", L"Current game priority / affinity", L"現在のゲームの優先度 / アフィニティ", L"현재 게임 우선순위 / 선호도" },   // TIP_HEADER
+    { L"CPU: %s", L"CPU: %s", L"CPU: %s", L"CPU: %s", L"CPU: %s" },   // TIP_CPU
+    { L"GPU: %s", L"GPU: %s", L"GPU: %s", L"GPU: %s", L"GPU: %s" },   // TIP_GPU
+    { L"I/O: %s", L"I/O: %s", L"I/O: %s", L"I/O: %s", L"I/O: %s" },   // TIP_IO
+    { L"核心: %s", L"核心: %s", L"Cores: %s", L"コア: %s", L"코어: %s" },   // TIP_CORES
+    { L"低 (Idle)", L"低 (Idle)", L"Idle", L"低 (Idle)", L"낮음 (Idle)" },   // PRIO_1
+    { L"低於標準", L"低于标准", L"Below normal", L"通常以下", L"보통 이하" },   // PRIO_2
+    { L"標準", L"标准", L"Normal", L"通常", L"보통" },   // PRIO_3
+    { L"高於標準", L"高于标准", L"Above normal", L"通常以上", L"보통 이상" },   // PRIO_4
+    { L"高", L"高", L"High", L"高", L"높음" },   // PRIO_5
+    { L"即時 (Realtime)", L"实时 (Realtime)", L"Realtime", L"リアルタイム (Realtime)", L"실시간 (Realtime)" },   // PRIO_6
+    { L"極低", L"极低", L"Very low", L"非常に低い", L"매우 낮음" },   // IO_1
+    { L"低", L"低", L"Low", L"低", L"낮음" },   // IO_2
+    { L"正常", L"正常", L"Normal", L"通常", L"보통" },   // IO_3
+    { L"高", L"高", L"High", L"高", L"높음" },   // IO_4
+    { L"切換無邊框 / 還原", L"切换无边框 / 还原", L"Toggle borderless / restore", L"ボーダーレス切替 / 元に戻す", L"테두리 없음 전환 / 복원" },   // M_TOGGLE
+    { L"鎖定視窗大小及位置", L"锁定窗口大小及位置", L"Lock window size and position", L"ウィンドウのサイズと位置を固定", L"창 크기 및 위치 고정" },   // M_LOCK
+    { L"重置視窗大小和位置", L"重置窗口大小和位置", L"Reset window size and position", L"ウィンドウのサイズと位置をリセット", L"창 크기 및 위치 초기화" },   // M_RESET
+    { L"遊戲優先權 / 親和性", L"游戏优先级 / 亲和性", L"Game priority / affinity", L"ゲームの優先度 / アフィニティ", L"게임 우선순위 / 선호도" },   // M_GAMEPRIO
+    { L"CPU優先權", L"CPU优先级", L"CPU priority", L"CPU 優先度", L"CPU 우선순위" },   // M_CPUPRIO
+    { L"CPU親和性", L"CPU亲和性", L"CPU affinity", L"CPU アフィニティ", L"CPU 선호도" },   // M_CPUAFF
+    { L"GPU優先權", L"GPU优先级", L"GPU priority", L"GPU 優先度", L"GPU 우선순위" },   // M_GPUPRIO
+    { L"於工具提示顯示目前狀態", L"在工具提示中显示当前状态", L"Show current status in tooltip", L"ツールチップに現在の状態を表示", L"툴팁에 현재 상태 표시" },   // M_TIPSHOW
+    { L"I/O優先權", L"I/O优先级", L"I/O priority", L"I/O 優先度", L"I/O 우선순위" },   // M_IOPRIO
+    { L"全選", L"全选", L"Select all", L"すべて選択", L"모두 선택" },   // AFF_ALL
+    { L"僅大核 (P-core)", L"仅大核 (P-core)", L"P-cores only", L"P コアのみ", L"P 코어만" },   // AFF_P
+    { L"僅大核 (P-core) 不含%s", L"仅大核 (P-core) 不含%s", L"P-cores only (no %s)", L"P コアのみ (%s なし)", L"P 코어만 (%s 제외)" },   // AFF_PNOHT
+    { L"僅實體核心 (不含%s)", L"仅物理核心 (不含%s)", L"Physical cores only (no %s)", L"物理コアのみ (%s なし)", L"물리 코어만 (%s 제외)" },   // AFF_NOHT
+    { L"僅小核 (E-core)", L"仅小核 (E-core)", L"E-cores only", L"E コアのみ", L"E 코어만" },   // AFF_E
+    { L"核心 %d %s", L"核心 %d %s", L"Core %d %s", L"コア %d %s", L"코어 %d %s" },   // CORE_ITEM
+    { L"(大核 P-core)", L"(大核 P-core)", L"(P-core)", L"(P コア)", L"(P 코어)" },   // CORE_P
+    { L"(大核 P-core) %s", L"(大核 P-core) %s", L"(P-core) %s", L"(P コア) %s", L"(P 코어) %s" },   // CORE_P_HT
+    { L"(小核 E-core)", L"(小核 E-core)", L"(E-core)", L"(E コア)", L"(E 코어)" },   // CORE_E
+    { L"(小核 E-core) %s", L"(小核 E-core) %s", L"(E-core) %s", L"(E コア) %s", L"(E 코어) %s" },   // CORE_E_HT
+    { L"(實體核心)", L"(物理核心)", L"(Physical core)", L"(物理コア)", L"(물리 코어)" },   // CORE_PHYS
+    { L"(%s)", L"(%s)", L"(%s)", L"(%s)", L"(%s)" },   // CORE_HT
+    { L"超執行緒", L"超线程", L"Hyper-Threading", L"ハイパースレッディング", L"하이퍼스레딩" },   // SMT_INTEL
+    { L"超執行緒", L"超线程", L"SMT", L"SMT", L"SMT" },   // SMT_OTHER
+    { L"限制CPU使用率", L"限制CPU使用率", L"Limit CPU usage", L"CPU 使用率を制限", L"CPU 사용률 제한" },   // M_LIMIT
+    { L"啟用CPU限制", L"启用CPU限制", L"Enable CPU limit", L"CPU 制限を有効にする", L"CPU 제한 사용" },   // M_ENABLE
+    { L"限制時同時降低優先權 / 節能模式", L"限制时同时降低优先级 / 节能模式", L"Lower priority / efficiency mode while limiting", L"制限中は優先度を下げる / 省電力モード", L"제한 중 우선순위 낮춤 / 효율 모드" },   // M_ECO
+    { L"生效條件", L"生效条件", L"When to apply", L"適用条件", L"적용 조건" },   // M_COND
+    { L"永遠限制 CPU 使用率", L"始终限制 CPU 使用率", L"Always limit CPU usage", L"常に CPU 使用率を制限", L"항상 CPU 사용률 제한" },   // C_ALWAYS
+    { L"僅在視窗最小化時生效", L"仅在窗口最小化时生效", L"Only when the window is minimized", L"ウィンドウ最小化時のみ", L"창이 최소화되었을 때만" },   // C_MIN
+    { L"僅在視窗最小化或於背景執行時生效", L"仅在窗口最小化或在后台运行时生效", L"Only when minimized or in the background", L"最小化またはバックグラウンド時のみ", L"최소화되었거나 백그라운드일 때만" },   // C_BG
+    { L"限制比例", L"限制比例", L"Limit ratio", L"制限割合", L"제한 비율" },   // M_RATIO
+    { L"強制重啟 / 結束遊戲", L"强制重启 / 结束游戏", L"Force restart / quit game", L"ゲームの強制再起動 / 終了", L"게임 강제 재시작 / 종료" },   // M_RESTARTMENU
+    { L"重啟遊戲 (Client.exe)", L"重启游戏 (Client.exe)", L"Restart game (Client.exe)", L"ゲームを再起動 (Client.exe)", L"게임 재시작 (Client.exe)" },   // M_RESTART_CLIENT
+    { L"重啟遊戲 (Mabinogi.exe)", L"重启游戏 (Mabinogi.exe)", L"Restart game (Mabinogi.exe)", L"ゲームを再起動 (Mabinogi.exe)", L"게임 재시작 (Mabinogi.exe)" },   // M_RESTART_LAUNCHER
+    { L"強制結束遊戲", L"强制结束游戏", L"Force quit game", L"ゲームを強制終了", L"게임 강제 종료" },   // M_TERM
+    { L"語言", L"语言", L"Language", L"言語", L"언어" },   // M_LANG
+    { L"自動選擇", L"自动选择", L"Auto", L"自動選択", L"자동 선택" },   // L_AUTO
+    { L"(限制中)", L"(限制中)", L"(Limited)", L"(制限中)", L"(제한됨)" },   // OV_LIMITING
+    { L"效能監控", L"性能监控", L"Performance monitor", L"パフォーマンスモニター", L"성능 모니터" },   // M_MON
+    { L"啟用監控", L"启用监控", L"Enable monitor", L"モニターを有効にする", L"모니터 사용" },   // MON_ENABLE
+    { L"顯示項目", L"显示项目", L"Items", L"表示項目", L"표시 항목" },   // MON_ITEMS
+    { L"比例", L"比例", L"Percentage", L"割合", L"비율" },   // MON_PCT
+    { L"實際值 (GHz)", L"实际值 (GHz)", L"Actual value (GHz)", L"実測値 (GHz)", L"실제 값 (GHz)" },   // MON_ACTUAL_GHZ
+    { L"實際值 (MB)", L"实际值 (MB)", L"Actual value (MB)", L"実測値 (MB)", L"실제 값 (MB)" },   // MON_ACTUAL_MB
+    { L"排列方式", L"排列方式", L"Layout", L"レイアウト", L"배치 방식" },   // MON_LAYOUT
+    { L"直式 (每行一項)", L"竖式 (每行一项)", L"Vertical (one item per line)", L"縦 (1 行に 1 項目)", L"세로 (한 줄에 한 항목)" },   // MON_VERT
+    { L"橫式 (以文字分隔)", L"横式 (以文字分隔)", L"Horizontal (separated by text)", L"横 (文字で区切る)", L"가로 (문자로 구분)" },   // MON_HORZ
+    { L"鎖定位置 (滑鼠穿透)", L"锁定位置 (鼠标穿透)", L"Lock position (click-through)", L"位置を固定 (クリックを透過)", L"위치 고정 (클릭 통과)" },   // MON_LOCK
+    { L"更新頻率", L"更新频率", L"Update interval", L"更新間隔", L"갱신 주기" },   // MON_INTERVAL
+    { L"外觀", L"外观", L"Appearance", L"外観", L"모양" },   // MON_STYLE
+    { L"字體大小", L"字体大小", L"Font size", L"フォントサイズ", L"글꼴 크기" },   // MON_FONTSIZE
+    { L"不透明度", L"不透明度", L"Opacity", L"不透明度", L"불투명도" },   // MON_OPACITY
+    { L"鎖定時無背景", L"锁定时无背景", L"No background when locked", L"固定時は背景なし", L"고정 시 배경 없음" },   // MON_LOCKNOBG
+    { L"重置位置", L"重置位置", L"Reset position", L"位置をリセット", L"위치 초기화" },   // MON_RESETPOS
+    { L"色碼格式不正確，請輸入 6 位數的 HEX (0-9、A-F)。", L"色码格式不正确，请输入 6 位 HEX (0-9、A-F)。", L"Invalid color code. Enter 6 hex digits (0-9, A-F).", L"カラーコードの形式が正しくありません。16 進数 6 桁 (0-9, A-F) で入力してください。", L"색상 코드 형식이 올바르지 않습니다. 6자리 HEX (0-9, A-F)를 입력해 주세요." },   // DLG_COLOR_BAD
+    { L"確定", L"确定", L"OK", L"OK", L"확인" },   // DLG_OK
+    { L"取消", L"取消", L"Cancel", L"キャンセル", L"취소" },   // DLG_CANCEL
+    { L"設定", L"设置", L"Settings", L"設定", L"설정" },   // SET_TITLE
+    { L"套用", L"应用", L"Apply", L"適用", L"적용" },   // DLG_APPLY
+    { L"字體顏色", L"字体颜色", L"Text color", L"文字の色", L"글꼴 색" },   // LBL_TEXTCOLOR
+    { L"文字外框顏色", L"文字外框颜色", L"Text outline color", L"文字の縁取りの色", L"글자 외곽선 색" },   // LBL_OUTLINECOLOR
+    { L"背景顏色", L"背景颜色", L"Background color", L"背景色", L"배경색" },   // LBL_BGCOLOR
+    { L"只在遊戲前景時顯示 (僅在設定視窗關閉後生效)", L"仅在游戏前台时显示 (仅在设置窗口关闭后生效)", L"Show only when the game is in the foreground (takes effect after this window is closed)", L"ゲームが前面のときのみ表示 (この画面を閉じた後に有効)", L"게임이 전면일 때만 표시 (이 창을 닫은 후 적용)" },   // MON_FGONLY_DLG
+    { L"每 0.5 秒", L"每 0.5 秒", L"Every 0.5 s", L"0.5 秒ごと", L"0.5초마다" },   // MON_EVERY_05
+    { L"每 1 秒", L"每 1 秒", L"Every 1 s", L"1 秒ごと", L"1초마다" },   // MON_EVERY_1
+    { L"每 2 秒", L"每 2 秒", L"Every 2 s", L"2 秒ごと", L"2초마다" },   // MON_EVERY_2
+    { L"連點兩下圖示的動作", L"双击图标的动作", L"Double-click action", L"ダブルクリックの動作", L"아이콘 두 번 클릭 동작" },   // M_DBLCLICK
+    { L"啟用CPU限制 / 關閉CPU限制", L"启用CPU限制 / 关闭CPU限制", L"Enable / disable CPU limit", L"CPU 制限の有効 / 無効を切り替え", L"CPU 제한 켜기 / 끄기" },   // DBL_CPU
+    { L"啟用監控 / 關閉監控", L"启用监控 / 关闭监控", L"Enable / disable monitor", L"モニターの有効 / 無効を切り替え", L"모니터 켜기 / 끄기" },   // DBL_MON
+    { L"重啟 Client.exe", L"重启 Client.exe", L"Restart Client.exe", L"Client.exe を再起動", L"Client.exe 재시작" },   // DLG_RESTART_CLIENT
+    { L"重啟 Mabinogi.exe", L"重启 Mabinogi.exe", L"Restart Mabinogi.exe", L"Mabinogi.exe を再起動", L"Mabinogi.exe 재시작" },   // DLG_RESTART_LAUNCHER
+    { L"關閉", L"关闭", L"Close", L"閉じる", L"닫기" },   // DLG_CLOSE
+    { L"顯示設定", L"显示设置", L"Display settings", L"表示設定", L"표시 설정" },   // MON_DISPLAY
+    { L"分隔文字", L"分隔文字", L"Separator", L"区切り文字", L"구분 문자" },   // MON_SEPARATOR
+    { L"顯示順序 (拖曳排序)", L"显示顺序 (拖动排序)", L"Order (drag to sort)", L"表示順序 (ドラッグ)", L"표시 순서 (끌어서 정렬)" },   // MON_ORDER
+    { L"CPU 使用率算法", L"CPU 使用率算法", L"CPU usage method", L"CPU 使用率の算出方法", L"CPU 사용률 계산 방식" },   // MON_METHOD
+    { L"週期法 (CPU 週期數)", L"周期法 (CPU 周期数)", L"Cycle count", L"サイクル数", L"주기 방식 (CPU 사이클 수)" },   // METHOD_CYC
+    { L"時間法 (行程 CPU 時間)", L"时间法 (进程 CPU 时间)", L"Process CPU time", L"プロセス CPU 時間", L"시간 방식 (프로세스 CPU 시간)" },   // METHOD_TIME
+    { L"診斷記錄", L"诊断记录", L"Diagnostic log", L"診断ログ", L"진단 기록" },   // MON_DEBUG
+    { L"複製", L"复制", L"Copy", L"コピー", L"복사" },   // DLG_COPY
+    { L"Latency 取樣方式", L"Latency 取样方式", L"Latency sampling", L"Latency の取得方法", L"Latency 샘플링 방식" },   // MON_LATMETHOD
+    { L"最近一次樣本值 (預設)", L"最近一次样本值 (默认)", L"Latest sample (default)", L"最新のサンプル値 (既定)", L"최근 샘플 값 (기본값)" },   // LAT_SAMPLE
+    { L"平滑往返時間", L"平滑往返时间", L"Smoothed round-trip time", L"平滑化した往復時間", L"평활화된 왕복 시간" },   // LAT_SMOOTH
+    { L"估算 (行程時間 × 系統 Utility/Time)", L"估算 (进程时间 × 系统 Utility/Time)", L"Estimate (process time x system utility/time)", L"推定 (プロセス時間 × システム Utility/Time)", L"추정 (프로세스 시간 × 시스템 Utility/Time)" },   // METHOD_EST
+    { L"設定...", L"设置...", L"Settings...", L"設定...", L"설정..." },   // M_SETTINGS
+    { L"關於", L"关于", L"About", L"バージョン情報", L"정보" },   // ABOUT_TITLE
+    { L"程式說明", L"程序说明", L"Description", L"プログラムの説明", L"프로그램 설명" },   // ABOUT_GROUP
     { L"瑪奇 (Mabinogi) Client.exe 的常駐管理工具 (顯示於通知區域)\n\n【主要功能說明】\n  ．視窗無邊框 / 鎖定大小位置 / 還原 (類似 Kisara 的偽全屏)\n  ．限制CPU使用率 (類似 BES, Battle Encoder Shirase 的CPU限制軟體)\n  ．優先權與親和性設定 (類似 Process Lasso 的程式優先權及CPU親和性的調整)\n  ．效能監控 (類似 XBOX Gamebar 的效能監控，另外加上資源監視器的網路TCP連線延遲資訊)",
       L"玛奇 (Mabinogi) Client.exe 的常驻管理工具 (显示于通知区域)\n\n【主要功能说明】\n  ．窗口无边框 / 锁定大小位置 / 还原 (类似 Kisara 的伪全屏)\n  ．限制CPU使用率 (类似 BES, Battle Encoder Shirase 的CPU限制软件)\n  ．优先级与亲和性设置 (类似 Process Lasso 的程序优先级及CPU亲和性的调整)\n  ．性能监控 (类似 XBOX Game Bar 的性能监控，另外加上资源监视器的网络TCP连接延迟信息)",
       L"A resident manager for Mabinogi's Client.exe (shown in the notification area)\n\n[Main features]\n  - Borderless window / lock size and position / restore (like Kisara's pseudo fullscreen)\n  - CPU usage limiting (like BES, Battle Encoder Shirase)\n  - Priority and affinity settings (like Process Lasso)\n  - Performance monitor (like the Xbox Game Bar, plus the TCP connection latency from Resource Monitor)",
-      L"マビノギ (Mabinogi) Client.exe の常駐管理ツール (通知領域に表示)\n\n【主な機能】\n  ・ウィンドウのボーダーレス化 / サイズと位置のロック / 元に戻す (Kisara の疑似フルスクリーンに類似)\n  ・CPU 使用率の制限 (BES, Battle Encoder Shirase に類似)\n  ・優先度とアフィニティの設定 (Process Lasso に類似)\n  ・パフォーマンス モニター (Xbox Game Bar に類似、リソース モニターの TCP 接続遅延情報も追加)" },   // ABOUT_TEXT
-    { L"停止更新", L"停止更新", L"Stop updating", L"更新を停止" },   // DLG_STOP_UPDATE
-    { L"自動更新", L"自动更新", L"Auto update", L"自動更新" },   // DLG_AUTO_UPDATE
-    { L"隱藏遊戲工作列", L"隐藏游戏任务栏", L"Hide game taskbar button", L"ゲームのタスクバー ボタンを隠す" },   // M_HIDE_TASKBAR
-    { L"限制滑鼠移動範圍", L"限制鼠标移动范围", L"Restrict mouse movement area", L"マウスの移動範囲を制限" },   // M_MOUSE_CLIP
-    { L"這項功能僅在視窗模式下生效", L"该功能仅在窗口模式下生效", L"This feature only works in windowed mode", L"この機能はウィンドウモードでのみ有効です" },   // TIP_WINDOWED
-    { L"這項功能僅在全螢幕模式下生效", L"该功能仅在全屏模式下生效", L"This feature only works in fullscreen mode", L"この機能はフルスクリーンモードでのみ有効です" },   // TIP_FULLSCREEN
-    { L"結束程式", L"退出程序", L"Exit", L"終了" },   // M_EXIT
+      L"マビノギ (Mabinogi) Client.exe の常駐管理ツール (通知領域に表示)\n\n【主な機能】\n  ・ウィンドウのボーダーレス化 / サイズと位置のロック / 元に戻す (Kisara の疑似フルスクリーンに類似)\n  ・CPU 使用率の制限 (BES, Battle Encoder Shirase に類似)\n  ・優先度とアフィニティの設定 (Process Lasso に類似)\n  ・パフォーマンス モニター (Xbox Game Bar に類似、リソース モニターの TCP 接続遅延情報も追加)", L"마비노기 (Mabinogi) Client.exe 상주 관리 도구 (알림 영역에 표시)\n\n[주요 기능]\n  - 창 테두리 없애기 / 크기·위치 고정 / 복원 (Kisara의 의사 전체 화면과 유사)\n  - CPU 사용률 제한 (BES, Battle Encoder Shirase와 유사)\n  - 우선순위 및 선호도 설정 (Process Lasso와 유사)\n  - 성능 모니터 (Xbox Game Bar와 유사하며, 리소스 모니터의 TCP 연결 지연 정보를 추가)" },   // ABOUT_TEXT
+    { L"停止更新", L"停止更新", L"Stop updating", L"更新を停止", L"갱신 중지" },   // DLG_STOP_UPDATE
+    { L"自動更新", L"自动更新", L"Auto update", L"自動更新", L"자동 갱신" },   // DLG_AUTO_UPDATE
+    { L"隱藏遊戲工作列", L"隐藏游戏任务栏", L"Hide game taskbar button", L"ゲームのタスクバー ボタンを隠す", L"게임 작업 표시줄 버튼 숨기기" },   // M_HIDE_TASKBAR
+    { L"限制滑鼠移動範圍", L"限制鼠标移动范围", L"Restrict mouse movement area", L"マウスの移動範囲を制限", L"마우스 이동 범위 제한" },   // M_MOUSE_CLIP
+    { L"這項功能僅在視窗模式下生效", L"该功能仅在窗口模式下生效", L"This feature only works in windowed mode", L"この機能はウィンドウモードでのみ有効です", L"이 기능은 창 모드에서만 작동합니다" },   // TIP_WINDOWED
+    { L"這項功能僅在全螢幕模式下生效", L"该功能仅在全屏模式下生效", L"This feature only works in fullscreen mode", L"この機能はフルスクリーンモードでのみ有効です", L"이 기능은 전체 화면 모드에서만 작동합니다" },   // TIP_FULLSCREEN
+    { L"遊戲視窗", L"游戏窗口", L"Game window", L"ゲームウィンドウ", L"게임 창" },   // CAT_WINDOW
+    { L"優先權 / 親和性", L"优先级 / 亲和性", L"Priority / affinity", L"優先度 / アフィニティ", L"우선순위 / 선호도" },   // CAT_PRIO
+    { L"CPU限制", L"CPU限制", L"CPU limit", L"CPU 制限", L"CPU 제한" },   // CAT_CPU
+    { L"其他", L"其他", L"Other", L"その他", L"기타" },   // CAT_OTHER
+    { L"無邊框", L"无边框", L"Borderless", L"ボーダーレス", L"테두리 없음" },   // BORDERLESS
+    { L"%s：已啟用", L"%s：已启用", L"%s: Enabled", L"%s：有効", L"%s: 켜짐" },   // TOAST_ON
+    { L"%s：已關閉", L"%s：已关闭", L"%s: Disabled", L"%s：無効", L"%s: 꺼짐" },   // TOAST_OFF
+    { L"開啟設定頁面", L"打开设置页面", L"Open settings", L"設定を開く", L"설정 열기" },   // DBL_SETTINGS
+    { L"隱藏 / 顯示遊戲工作列", L"隐藏 / 显示游戏任务栏", L"Hide / show game taskbar button", L"ゲームのタスクバー ボタンの非表示 / 表示", L"게임 작업 표시줄 버튼 숨기기 / 표시" },   // DBL_TASKBAR
+    { L"視窗", L"窗口", L"Window", L"ウィンドウ", L"창" },   // G_WINDOW
+    { L"滑鼠", L"鼠标", L"Mouse", L"マウス", L"마우스" },   // G_MOUSE
+    { L"優先權", L"优先级", L"Priority", L"優先度", L"우선순위" },   // G_PRIO
+    { L"鎖定方式", L"锁定方式", L"Lock method", L"固定方法", L"잠금 방식" },   // LOCKSTYLE
+    { L"不改變視窗樣式 (預設)", L"不改变窗口样式 (默认)", L"Keep the window style (default)", L"ウィンドウのスタイルを変更しない (既定)", L"창 스타일 유지 (기본값)" },   // LOCKSTYLE_0
+    { L"移除縮放邊框與最大化按鈕", L"移除缩放边框与最大化按钮", L"Remove the sizing border and maximize button", L"サイズ変更枠と最大化ボタンを削除", L"크기 조절 테두리와 최대화 버튼 제거" },   // LOCKSTYLE_1
+    { L"「無邊框」「鎖定」「重置」只在遊戲顯示器模式為「視窗模式」時生效。", L"「无边框」「锁定」「重置」仅在游戏显示器模式为「窗口模式」时生效。", L"Borderless, lock and reset only work while the game's display mode is windowed mode.", L"「ボーダーレス」「固定」「リセット」は、ゲームの表示モードが「ウィンドウモード」のときのみ有効です。", L"'테두리 없음', '잠금', '초기화'는 게임의 디스플레이 모드가 '창 모드'일 때만 작동합니다." },   // NOTE_WINDOWED
+    { L"邊界寬度 (像素)", L"边界宽度 (像素)", L"Margin width (pixels)", L"余白の幅 (ピクセル)", L"경계 너비 (픽셀)" },   // CLIP_MARGIN
+    { L"(0 ~ 200)", L"(0 ~ 200)", L"(0 ~ 200)", L"(0 ~ 200)", L"(0 ~ 200)" },   // CLIP_RANGE
+    { L"也套用於「無邊框全視窗模式」", L"也应用于「无边框全窗口模式」", L"Also apply in borderless full-window mode", L"「ボーダーレス全画面ウィンドウモード」にも適用", L"'테두리 없는 전체 창 모드'에도 적용" },   // CLIP_BL
+    { L"(尚未設定)", L"(尚未设置)", L"(not set)", L"(未設定)", L"(설정 안 됨)" },   // PRIO_UNSET
+    { L"結束程式", L"退出程序", L"Exit", L"終了", L"종료" },   // M_EXIT
 };
 
 static inline const wchar_t* T(int id) { return kStr[id][g_lang - 1]; }
@@ -540,13 +579,14 @@ static int DetectSystemLang() {
     WORD p = PRIMARYLANGID(id), sub = SUBLANGID(id);
     if (p == LANG_CHINESE) return (sub == SUBLANG_CHINESE_SIMPLIFIED || sub == SUBLANG_CHINESE_SINGAPORE) ? UL_ZHCN : UL_ZHTW;
     if (p == LANG_JAPANESE) return UL_JA;
+    if (p == LANG_KOREAN) return UL_KO;
     return UL_EN;
 }
 
 // 優先讀設定檔的語言；設定為「自動」(或沒有設定) 時依系統語系
 static void ApplyLanguage() {
     int sel = g_langSetting;
-    g_lang = (sel >= UL_ZHTW && sel <= UL_JA) ? sel : DetectSystemLang();
+    g_lang = (sel >= UL_ZHTW && sel <= UL_KO) ? sel : DetectSystemLang();
 }
 
 static const wchar_t* LangName(int l) {
@@ -554,16 +594,29 @@ static const wchar_t* LangName(int l) {
     case UL_ZHTW: return L"zh-TW";
     case UL_ZHCN: return L"zh-CN";
     case UL_EN: return L"en";
-    case UL_JA: return L"jp";
+    case UL_JA: return L"ja";
+    case UL_KO: return L"ko";
     }
     return L"auto";
+}
+
+static const wchar_t* LangLabel(int l) {
+    switch (l) {
+    case UL_ZHTW: return L"繁體中文 Chinese Traditional";
+    case UL_ZHCN: return L"简体中文 Chinese Simplified";
+    case UL_EN: return L"英文 English";
+    case UL_JA: return L"日本語 Japanese";
+    case UL_KO: return L"한국어 Korean";
+    }
+    return L"";
 }
 
 static int LangFromName(const wchar_t* n) {
     if (_wcsicmp(n, L"zh-TW") == 0) return UL_ZHTW;
     if (_wcsicmp(n, L"zh-CN") == 0) return UL_ZHCN;
     if (_wcsicmp(n, L"en") == 0) return UL_EN;
-    if (_wcsicmp(n, L"jp") == 0) return UL_JA;
+    if (_wcsicmp(n, L"ja") == 0) return UL_JA;
+    if (_wcsicmp(n, L"ko") == 0) return UL_KO;
     return UL_AUTO;
 }
 
@@ -794,7 +847,7 @@ static void LoadOverlaySettings() {
         g_ovSeparator = sb;
         g_ovOrder = ParseOvOrder(ob);
     }
-    g_dblAction = IniInt(L"DoubleClick", 0, 0, 2);
+    g_dblAction = IniInt(L"DoubleClick", 0, 0, 4);
     g_ovLayout = IniInt(L"OvLayout", 0, 0, 1);
     g_ovFgOnly = IniBool(L"OvFgOnly", 0);
     g_ovLocked = IniBool(L"OvLocked", 0);
@@ -3621,7 +3674,7 @@ static void RenderOverlay(bool force) {
         std::lock_guard<std::mutex> lk(g_ovMtx);
         s = g_ovSample;
     }
-    if (g_monDlgOpen && (!g_ovEnabled || !s.game)) s = DemoSample();
+    if (g_monPreview && (!g_ovEnabled || !s.game)) s = DemoSample();
     std::vector<std::wstring> lines;
     BuildOverlayLines(s, lines);
     if (lines.empty()) return;
@@ -3812,7 +3865,7 @@ static bool OverlayCovered() {
 }
 
 // 顯示規則：
-//   * 設定視窗開啟期間固定顯示 (預覽)，不受「只在遊戲前景時顯示」影響
+//   * 設定視窗顯示「效能監控」頁期間固定顯示 (預覽)，不受「只在遊戲前景時顯示」影響
 //   * 平常：啟用監控且遊戲執行中才顯示；遊戲最小化時隱藏
 //   * 「只在遊戲前景時顯示」：前景不是遊戲就隱藏；但前景是本工具 (選單) 或工作列 / 縮圖預覽時維持原狀，避免閃爍
 //   * 顯示期間每 40 毫秒檢查一次有沒有被工作列等視窗蓋住，被蓋住才立刻重新置頂
@@ -3820,7 +3873,7 @@ static void UpdateOverlayVisibility() {
     if (!g_ovHwnd) return;
     bool want = false;
     DWORD gp = g_gamePid;
-    if (g_monDlgOpen) {
+    if (g_monPreview) {
         want = HasAnyOverlayItem();
     } else if (g_ovEnabled && gp && HasAnyOverlayItem()) {
         want = true;
@@ -4017,6 +4070,15 @@ static void OverlayChanged() {
     OverlayRefresh();
 }
 
+// 設定視窗的頁面 (左側選單)
+enum SetPage { SP_WINDOW = 0, SP_PRIO, SP_CPU, SP_MON, SP_OTHER, SP_ABOUT, SP_COUNT };
+#define WM_SD_SELPAGE (WM_APP + 10)   // 切換到指定的頁面 (wp = 頁面)
+
+static const wchar_t* PrioName(int lv);
+static const wchar_t* IoName(int lv);
+static std::wstring CoreTypeText(int core);
+static void HandleCommand(int id);
+
 enum MonDlgIds {
     MD_CPU = 2001, MD_CPU_PCT, MD_CPU_ACT, MD_RAM, MD_RAM_PCT, MD_RAM_ACT, MD_GPU, MD_VRAM, MD_VRAM_PCT, MD_VRAM_ACT, MD_FPS, MD_LAT,
     MD_ENABLE, MD_LAYOUT, MD_SEP, MD_INTERVAL, MD_METHOD, MD_LATMETHOD, MD_ORDER, MD_FONT, MD_TEXTCOLOR, MD_TEXTSWATCH, MD_OUTLINE, MD_OUTSWATCH, MD_OPACITY, MD_BGCOLOR, MD_BGSWATCH,
@@ -4143,6 +4205,7 @@ static bool ReadMonDlg(HWND dlg, OvSettings& s) {
         b[0] = 0;
         GetDlgItemTextW(dlg, ids[i], b, 32);
         if (!ParseHex6(b, &cols[i])) {
+            SendMessageW(dlg, WM_SD_SELPAGE, (WPARAM)SP_MON, 0);   // 色碼在「效能監控」頁：先切換到該頁
             MessageBoxW(dlg, T(S_DLG_COLOR_BAD), L"Mabinogi Client Manager", MB_OK | MB_ICONWARNING);
             SetFocus(GetDlgItem(dlg, ids[i]));
             return false;
@@ -4233,8 +4296,487 @@ static void ListMove(HWND lb, int from, int to) {
     SendMessageW(lb, LB_SETCURSEL, (WPARAM)idx, 0);
 }
 
-static INT_PTR CALLBACK MonDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
-    MonDlgCtx* c = (MonDlgCtx*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
+static void TmplAlign(std::vector<WORD>& v) {
+    if (v.size() & 1) v.push_back(0);
+}
+
+static void TmplStr(std::vector<WORD>& v, const wchar_t* s) {
+    while (*s) v.push_back((WORD)*s++);
+    v.push_back(0);
+}
+
+static void TmplItem(std::vector<WORD>& v, DWORD style, short x, short y, short cx, short cy, WORD id, WORD classAtom, const wchar_t* text) {
+    TmplAlign(v);
+    v.push_back((WORD)(style & 0xFFFF));
+    v.push_back((WORD)(style >> 16));
+    v.push_back(0);
+    v.push_back(0);   // 擴充樣式
+    v.push_back((WORD)x);
+    v.push_back((WORD)y);
+    v.push_back((WORD)cx);
+    v.push_back((WORD)cy);
+    v.push_back(id);
+    v.push_back(0xFFFF);
+    v.push_back(classAtom);   // 0x0080 按鈕、0x0081 編輯、0x0082 靜態文字、0x0085 下拉式方塊
+    TmplStr(v, text);
+    v.push_back(0);   // 沒有建立資料
+}
+
+static void TmplItemCls(std::vector<WORD>& v, DWORD style, short x, short y, short cx, short cy, WORD id, const wchar_t* cls, const wchar_t* text) {
+    TmplAlign(v);
+    v.push_back((WORD)(style & 0xFFFF));
+    v.push_back((WORD)(style >> 16));
+    v.push_back(0);
+    v.push_back(0);   // 擴充樣式
+    v.push_back((WORD)x);
+    v.push_back((WORD)y);
+    v.push_back((WORD)cx);
+    v.push_back((WORD)cy);
+    v.push_back(id);
+    TmplStr(v, cls);    // 以名稱指定控制項類別 (例如 SysListView32)
+    TmplStr(v, text);
+    v.push_back(0);     // 沒有建立資料
+}
+
+// ---------------------------------------------------------------------------
+//  設定視窗：左側選單 (sidebar) 依設定種類分類，右側顯示該類別的設定
+//  類別：遊戲視窗 / 優先權 / 親和性 / CPU 限制 / 效能監控 / 其他 / 關於
+//  按「套用」或「確定」才會變更 (效能監控頁的語意同以前：套用 = 立即變更監控畫面但不寫入 ini，確定 = 寫入 ini，取消 = 回復)
+// ---------------------------------------------------------------------------
+enum SetDlgIds {
+    SD_NAV = 6001,
+    SD_W_BORDERLESS, SD_W_LOCK, SD_W_LOCKSTYLE, SD_W_HIDETB, SD_W_RESET, SD_W_CLIP, SD_W_MARGIN, SD_W_CLIPBL,
+    SD_P_CPU, SD_P_GPU, SD_P_IO, SD_P_ALL, SD_P_P, SD_P_PNOHT, SD_P_E, SD_P_AFF, SD_P_TIP,
+    SD_C_ENABLE, SD_C_ECO, SD_C_COND, SD_C_RATIO,
+    SD_O_DBL, SD_O_LANG,
+    SD_AUTO_BASE = 6500     // 靜態文字 / 群組框的自動編號
+};
+enum { AB_LOG = 3001, AB_COPY, AB_PAUSE, AB_LINK };
+
+static HWND g_setDlg = NULL;   // 設定視窗
+
+// 非監控頁的設定值 (視窗上的內容 / 開啟或上次套用時的基準值)
+struct SetVals {
+    bool borderless, lock, hideTb, clip, clipBl, tip, cpuEnabled, eco;
+    int lockStyle, margin, cpuPrio, gpuPrio, ioPrio, mode, ratio, dbl, lang;
+    unsigned long long aff;
+};
+
+struct SetCtx : MonDlgCtx {
+    SetVals base;                 // 開啟 / 上次套用時的值：只有和它不同的項目才會被套用，不會蓋掉在視窗外 (選單、連點圖示) 做的變更
+    OvSettings monBase;           // 監控頁：開啟 / 上次套用時的值
+    int page;
+    bool reopen;                  // 變更語言後重新建立視窗
+    std::vector<std::pair<WORD, int> > pageOf;   // 控制項 -> 所屬頁面 (-1 = 每頁都顯示)
+    HFONT font;                   // 診斷記錄用的等寬字型
+    HFONT linkFont;               // 連結用的底線字型
+    bool paused;
+    std::wstring lastLog;
+};
+
+// CPU 親和性清單顯示的遮罩：設定檔尚未設定時，顯示遊戲目前的實際值 (遊戲沒有執行時顯示全部核心)
+static unsigned long long DialogAffMask() {
+    unsigned long long m = g_cfgAffMask;
+    if (m == 0) {
+        std::vector<DWORD> pids = GetClientPids();
+        if (!pids.empty()) {
+            HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pids[0]);
+            if (h) {
+                DWORD_PTR pm = 0, sm = 0;
+                if (GetProcessAffinityMask(h, &pm, &sm)) m = (unsigned long long)pm;
+                CloseHandle(h);
+            }
+        }
+    }
+    m &= (unsigned long long)g_maskAll;
+    if (m == 0) m = (unsigned long long)g_maskAll;
+    return m;
+}
+
+static SetVals CaptureSetVals() {
+    SetVals v;
+    v.borderless = g_borderless;
+    v.lock = g_locked;
+    v.hideTb = g_hideTaskbar;
+    v.clip = g_mouseClip;
+    v.clipBl = g_mouseClipBorderless;
+    v.tip = g_showTip;
+    v.cpuEnabled = g_cpuEnabled;
+    v.eco = g_eco;
+    v.lockStyle = g_lockStyle;
+    v.margin = g_mouseClipMargin;
+    v.cpuPrio = g_cfgCpuPrio;
+    v.gpuPrio = g_cfgGpuPrio;
+    v.ioPrio = g_cfgIoPrio;
+    v.mode = g_mode;
+    v.ratio = g_ratio;
+    v.dbl = g_dblAction;
+    v.lang = g_langSetting;
+    v.aff = DialogAffMask();
+    return v;
+}
+
+// 選取下拉選單中資料值為 value 的項目；沒有這個值時 (例如 ini 設成選單沒有的值) 多加一個項目保留原值
+static void ComboSelectValue(HWND dlg, int id, int value, const std::wstring& labelIfMissing) {
+    HWND cb = GetDlgItem(dlg, id);
+    int n = (int)SendMessageW(cb, CB_GETCOUNT, 0, 0);
+    for (int i = 0; i < n; ++i) {
+        if ((int)SendMessageW(cb, CB_GETITEMDATA, (WPARAM)i, 0) == value) {
+            SendMessageW(cb, CB_SETCURSEL, (WPARAM)i, 0);
+            return;
+        }
+    }
+    ComboAdd(dlg, id, labelIfMissing.c_str(), value);
+    SendMessageW(cb, CB_SETCURSEL, (WPARAM)n, 0);
+}
+
+static void AffListSet(HWND lv, unsigned long long mask) {
+    int n = (int)SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0);
+    for (int r = 0; r < n; ++r) {
+        LVITEMW it;
+        ZeroMemory(&it, sizeof(it));
+        it.mask = LVIF_PARAM;
+        it.iItem = r;
+        if (!SendMessageW(lv, LVM_GETITEMW, 0, (LPARAM)&it)) continue;
+        ListView_SetCheckState(lv, r, ((mask >> it.lParam) & 1) ? TRUE : FALSE);
+    }
+}
+
+static unsigned long long AffListGet(HWND lv) {
+    unsigned long long mask = 0;
+    int n = (int)SendMessageW(lv, LVM_GETITEMCOUNT, 0, 0);
+    for (int r = 0; r < n; ++r) {
+        LVITEMW it;
+        ZeroMemory(&it, sizeof(it));
+        it.mask = LVIF_PARAM;
+        it.iItem = r;
+        if (!SendMessageW(lv, LVM_GETITEMW, 0, (LPARAM)&it)) continue;
+        if (ListView_GetCheckState(lv, r)) mask |= (1ULL << it.lParam);
+    }
+    return mask;
+}
+
+// 把設定值顯示到視窗上
+static void LoadSetVals(HWND dlg, const SetVals& v) {
+    DlgSetChecked(dlg, SD_W_BORDERLESS, v.borderless);
+    DlgSetChecked(dlg, SD_W_LOCK, v.lock);
+    DlgSetChecked(dlg, SD_W_HIDETB, v.hideTb);
+    DlgSetChecked(dlg, SD_W_CLIP, v.clip);
+    DlgSetChecked(dlg, SD_W_CLIPBL, v.clipBl);
+    ComboSelectValue(dlg, SD_W_LOCKSTYLE, v.lockStyle, L"?");
+    SetDlgItemInt(dlg, SD_W_MARGIN, (UINT)v.margin, FALSE);
+    ComboSelectValue(dlg, SD_P_CPU, v.cpuPrio, T(S_PRIO_UNSET));
+    ComboSelectValue(dlg, SD_P_GPU, v.gpuPrio, T(S_PRIO_UNSET));
+    ComboSelectValue(dlg, SD_P_IO, v.ioPrio, T(S_PRIO_UNSET));
+    AffListSet(GetDlgItem(dlg, SD_P_AFF), v.aff);
+    DlgSetChecked(dlg, SD_P_TIP, v.tip);
+    DlgSetChecked(dlg, SD_C_ENABLE, v.cpuEnabled);
+    DlgSetChecked(dlg, SD_C_ECO, v.eco);
+    ComboSelectValue(dlg, SD_C_COND, v.mode, L"?");
+    ComboSelectValue(dlg, SD_C_RATIO, v.ratio, ComboLabel(1, v.ratio));
+    ComboSelectValue(dlg, SD_O_DBL, v.dbl, L"?");
+    ComboSelectValue(dlg, SD_O_LANG, v.lang, L"?");
+}
+
+// 讀取視窗上的設定值 (讀不到的項目沿用基準值)
+static void ReadSetVals(HWND dlg, const SetVals& base, SetVals& w) {
+    w = base;
+    w.borderless = DlgChecked(dlg, SD_W_BORDERLESS);
+    w.lock = DlgChecked(dlg, SD_W_LOCK);
+    w.hideTb = DlgChecked(dlg, SD_W_HIDETB);
+    w.clip = DlgChecked(dlg, SD_W_CLIP);
+    w.clipBl = DlgChecked(dlg, SD_W_CLIPBL);
+    w.lockStyle = ComboValue(dlg, SD_W_LOCKSTYLE, base.lockStyle);
+    BOOL ok = FALSE;
+    UINT m = GetDlgItemInt(dlg, SD_W_MARGIN, &ok, FALSE);
+    w.margin = ok ? (int)std::min<UINT>(m, 200) : base.margin;
+    w.cpuPrio = ComboValue(dlg, SD_P_CPU, base.cpuPrio);
+    w.gpuPrio = ComboValue(dlg, SD_P_GPU, base.gpuPrio);
+    w.ioPrio = ComboValue(dlg, SD_P_IO, base.ioPrio);
+    w.aff = AffListGet(GetDlgItem(dlg, SD_P_AFF));
+    w.tip = DlgChecked(dlg, SD_P_TIP);
+    w.cpuEnabled = DlgChecked(dlg, SD_C_ENABLE);
+    w.eco = DlgChecked(dlg, SD_C_ECO);
+    w.mode = ComboValue(dlg, SD_C_COND, base.mode);
+    w.ratio = ComboValue(dlg, SD_C_RATIO, base.ratio);
+    w.dbl = ComboValue(dlg, SD_O_DBL, base.dbl);
+    w.lang = ComboValue(dlg, SD_O_LANG, base.lang);
+}
+
+// 套用非監控頁的設定：只處理和基準值 (b) 不同、而且和目前實際狀態不同的項目，直接沿用選單的處理流程。
+// 回傳是否變更了語言。
+static bool CommitSetVals(const SetVals& w, const SetVals& b) {
+    // --- 遊戲視窗 ---
+    if (w.lockStyle != b.lockStyle && w.lockStyle != g_lockStyle) {
+        bool redo = g_locked && !GetGameWindows().empty();
+        if (redo) HandleCommand(ID_LOCK);   // 先用舊的方式解除鎖定
+        g_lockStyle = w.lockStyle;
+        SaveInt(L"LockStyle", g_lockStyle);
+        if (redo && !g_locked) HandleCommand(ID_LOCK);   // 再用新的方式鎖定
+    }
+    bool lockChange = (w.lock != b.lock && w.lock != g_locked);
+    if (lockChange && !w.lock) HandleCommand(ID_LOCK);
+    if (w.borderless != b.borderless && w.borderless != g_borderless) HandleCommand(ID_TOGGLE);
+    if (lockChange && w.lock) HandleCommand(ID_LOCK);
+    if (w.hideTb != b.hideTb && w.hideTb != g_hideTaskbar) HandleCommand(ID_HIDE_TASKBAR);
+    bool clipOpt = false;
+    if (w.margin != b.margin && w.margin != g_mouseClipMargin) {
+        g_mouseClipMargin = w.margin;
+        SaveInt(L"MouseClipMargin", g_mouseClipMargin);
+        clipOpt = true;
+    }
+    if (w.clipBl != b.clipBl && w.clipBl != g_mouseClipBorderless) {
+        g_mouseClipBorderless = w.clipBl;
+        SaveInt(L"MouseClipBorderless", g_mouseClipBorderless ? 1 : 0);
+        clipOpt = true;
+    }
+    if (w.clip != b.clip && w.clip != g_mouseClip) HandleCommand(ID_MOUSE_CLIP);
+    else if (clipOpt && g_mouseClip) UpdateMouseClip();
+    // --- 優先權 / 親和性 ---
+    if (w.cpuPrio != b.cpuPrio && w.cpuPrio >= 1 && w.cpuPrio <= 6) HandleCommand(ID_PRIO_CPU_BASE + w.cpuPrio);
+    if (w.gpuPrio != b.gpuPrio && w.gpuPrio >= 1 && w.gpuPrio <= 6) HandleCommand(ID_GPU_BASE + w.gpuPrio);
+    if (w.ioPrio != b.ioPrio && w.ioPrio >= 1 && w.ioPrio <= 4) HandleCommand(ID_IO_BASE + w.ioPrio);
+    if (w.aff != b.aff) {
+        if (w.aff == 0) Notify(T(S_NEED_ONE_CORE));
+        else SetAffMask(w.aff & (unsigned long long)g_maskAll);
+    }
+    if (w.tip != b.tip && w.tip != g_showTip) HandleCommand(ID_SHOWTIP);
+    // --- CPU 限制 ---
+    if (w.cpuEnabled != b.cpuEnabled && w.cpuEnabled != g_cpuEnabled) HandleCommand(ID_CPU_ENABLE);
+    if (w.eco != b.eco && w.eco != g_eco) HandleCommand(ID_ECO);
+    if (w.mode != b.mode && w.mode >= 1 && w.mode <= 3 && w.mode != g_mode) SetMode(w.mode);
+    if (w.ratio != b.ratio && w.ratio >= 1 && w.ratio <= 99 && w.ratio != g_ratio) {
+        g_ratio = w.ratio;
+        SaveInt(L"Ratio", w.ratio);
+        WakeEngine();
+    }
+    // --- 其他 ---
+    if (w.dbl != b.dbl && w.dbl >= 0 && w.dbl <= 4 && w.dbl != g_dblAction) HandleCommand(ID_DBL_BASE + w.dbl);
+    bool langChanged = false;
+    if (w.lang != b.lang && w.lang >= UL_AUTO && w.lang <= UL_KO && w.lang != g_langSetting) {
+        HandleCommand(ID_LANG_BASE + w.lang);
+        langChanged = true;
+    }
+    return langChanged;
+}
+
+// 監控設定是否有變 (位置不算：位置由拖曳決定，不在視窗上編輯)
+static bool OvEqual(const OvSettings& a, const OvSettings& b) {
+    return a.cpu == b.cpu && a.cpuPct == b.cpuPct && a.cpuGhz == b.cpuGhz && a.ram == b.ram && a.ramPct == b.ramPct && a.ramMb == b.ramMb &&
+           a.gpu == b.gpu && a.vram == b.vram && a.vramPct == b.vramPct && a.vramMb == b.vramMb && a.fps == b.fps && a.latency == b.latency &&
+           a.enabled == b.enabled && a.fgOnly == b.fgOnly && a.locked == b.locked && a.lockNoBg == b.lockNoBg &&
+           a.layout == b.layout && a.intervalMs == b.intervalMs && a.fontSize == b.fontSize && a.opacity == b.opacity &&
+           a.cpuMethod == b.cpuMethod && a.latMethod == b.latMethod && a.textColor == b.textColor && a.outlineColor == b.outlineColor &&
+           a.bgColor == b.bgColor && a.separator == b.separator && a.order == b.order;
+}
+
+// 套用期間暫時停用設定視窗：避免提示視窗 (例如「遊戲未啟動」) 開著時又按到「套用」
+struct DlgDisable {
+    HWND h;
+    explicit DlgDisable(HWND d) : h(d) { EnableWindow(h, FALSE); }
+    ~DlgDisable() { EnableWindow(h, TRUE); }
+};
+
+// 套用視窗上的所有設定。save = true (按「確定」) 時，監控設定也寫入 ini。
+// 回傳 false = 內容有誤 (已提示)，視窗維持開啟。
+static bool CommitSettings(HWND dlg, SetCtx* c, bool save, bool* langChanged) {
+    *langChanged = false;
+    OvSettings ms;
+    if (!ReadMonDlg(dlg, ms)) return false;
+    SetVals want;
+    ReadSetVals(dlg, c->base, want);
+    DlgDisable guard(dlg);
+    if (!OvEqual(ms, c->monBase)) {
+        ApplyOvSettings(ms);
+        OverlayRefresh();   // 立即變更監控畫面，尚未寫入 ini
+        c->monBase = ms;
+    }
+    if (save) SaveOverlaySettings();   // 按下確定才寫入 ini
+    *langChanged = CommitSetVals(want, c->base);
+    c->base = CaptureSetVals();
+    LoadSetVals(dlg, c->base);
+    return true;
+}
+
+// 記錄區塊正在被使用者操作 (選取文字 / 捲動) 時不更新內容
+static bool AboutLogBusy(HWND ed) {
+    DWORD selStart = 0, selEnd = 0;
+    SendMessageW(ed, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    if (GetFocus() == ed && selStart != selEnd) return true;
+    SCROLLINFO si;
+    ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    if (GetScrollInfo(ed, SB_VERT, &si) && si.nPos != 0) return true;
+    ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    if (GetScrollInfo(ed, SB_HORZ, &si) && si.nPos != 0) return true;
+    return false;
+}
+
+static void UpdateAboutLog(HWND dlg, SetCtx* c) {
+    if (!c || c->paused) return;
+    HWND ed = GetDlgItem(dlg, AB_LOG);
+    if (AboutLogBusy(ed)) return;
+    std::wstring txt = BuildDebugText();
+    if (txt != c->lastLog) {
+        c->lastLog = txt;
+        SetWindowTextW(ed, txt.c_str());
+    }
+}
+
+// 切換頁面：只顯示該頁的控制項。效能監控頁開啟期間監控畫面固定顯示 (預覽)；
+// 診斷記錄只在「關於」頁顯示期間收集 (不寫入檔案)。
+static void SelectPage(HWND dlg, SetCtx* c, int page) {
+    if (page < 0 || page >= SP_COUNT) page = 0;
+    c->page = page;
+    SendDlgItemMessageW(dlg, SD_NAV, LB_SETCURSEL, (WPARAM)page, 0);
+    for (size_t i = 0; i < c->pageOf.size(); ++i) {
+        if (c->pageOf[i].second < 0) continue;
+        HWND h = GetDlgItem(dlg, c->pageOf[i].first);
+        if (h) ShowWindow(h, c->pageOf[i].second == page ? SW_SHOWNA : SW_HIDE);
+    }
+    bool mon = (page == SP_MON), about = (page == SP_ABOUT);
+    if (mon != g_monPreview) {
+        g_monPreview = mon;
+        OverlayRefresh();
+    }
+    if (about != g_ovDebug) {
+        g_ovDebug = about;
+        if (about) {
+            ClearDebugText();
+            if (g_monWake) SetEvent(g_monWake);
+            UpdateAboutLog(dlg, c);
+        }
+    }
+}
+
+// 效能監控頁：以目前的監控設定初始化控制項
+static void MonPageInit(HWND dlg, SetCtx* c) {
+    const OvSettings& s = c->monBase;
+    DlgSetChecked(dlg, MD_CPU, s.cpu);
+    DlgSetChecked(dlg, MD_CPU_PCT, s.cpuPct);
+    DlgSetChecked(dlg, MD_CPU_ACT, s.cpuGhz);
+    DlgSetChecked(dlg, MD_RAM, s.ram);
+    DlgSetChecked(dlg, MD_RAM_PCT, s.ramPct);
+    DlgSetChecked(dlg, MD_RAM_ACT, s.ramMb);
+    DlgSetChecked(dlg, MD_GPU, s.gpu);
+    DlgSetChecked(dlg, MD_VRAM, s.vram);
+    DlgSetChecked(dlg, MD_VRAM_PCT, s.vramPct);
+    DlgSetChecked(dlg, MD_VRAM_ACT, s.vramMb);
+    DlgSetChecked(dlg, MD_FPS, s.fps);
+    DlgSetChecked(dlg, MD_ENABLE, s.enabled);
+    DlgSetChecked(dlg, MD_LAT, s.latency);
+    DlgSetChecked(dlg, MD_LOCKNOBG, s.lockNoBg);
+    DlgSetChecked(dlg, MD_FGONLY, s.fgOnly);
+    DlgSetChecked(dlg, MD_LOCK, s.locked);
+    ComboAdd(dlg, MD_LAYOUT, T(S_MON_VERT), 0);
+    ComboAdd(dlg, MD_LAYOUT, T(S_MON_HORZ), 1);
+    SendDlgItemMessageW(dlg, MD_LAYOUT, CB_SETCURSEL, (WPARAM)(s.layout == 1 ? 1 : 0), 0);
+    SetDlgItemTextW(dlg, MD_SEP, s.separator.c_str());
+    SendDlgItemMessageW(dlg, MD_SEP, EM_LIMITTEXT, 12, 0);
+    EnableWindow(GetDlgItem(dlg, MD_SEP), s.layout == 1);   // 分隔文字只有橫式用得到
+    ComboAdd(dlg, MD_METHOD, T(S_METHOD_CYC), 0);
+    ComboAdd(dlg, MD_METHOD, T(S_METHOD_TIME), 1);
+    ComboAdd(dlg, MD_METHOD, T(S_METHOD_EST), 2);
+    SendDlgItemMessageW(dlg, MD_METHOD, CB_SETCURSEL, (WPARAM)((s.cpuMethod >= 0 && s.cpuMethod <= 2) ? s.cpuMethod : 0), 0);
+    ComboAdd(dlg, MD_LATMETHOD, T(S_LAT_SAMPLE), 0);
+    ComboAdd(dlg, MD_LATMETHOD, T(S_LAT_SMOOTH), 1);
+    SendDlgItemMessageW(dlg, MD_LATMETHOD, CB_SETCURSEL, (WPARAM)(s.latMethod == 1 ? 1 : 0), 0);
+    for (size_t i = 0; i < s.order.size(); ++i) {
+        LRESULT idx = SendDlgItemMessageW(dlg, MD_ORDER, LB_ADDSTRING, 0, (LPARAM)kOvItemNames[s.order[i]]);
+        SendDlgItemMessageW(dlg, MD_ORDER, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)s.order[i]);
+    }
+    MakeDragList(GetDlgItem(dlg, MD_ORDER));   // 可用滑鼠拖曳調整顯示順序
+    ComboFill(dlg, MD_INTERVAL, kOvIntervals, kOvIntervalCount, s.intervalMs, 2);
+    ComboFill(dlg, MD_FONT, kOvFontSizes, kOvFontCount, s.fontSize, 0);
+    ComboFill(dlg, MD_OPACITY, kOvOpacities, kOvOpacityCount, s.opacity, 1);
+    SetDlgItemTextW(dlg, MD_TEXTCOLOR, Hex6(s.textColor).c_str());
+    SetDlgItemTextW(dlg, MD_OUTLINE, Hex6(s.outlineColor).c_str());
+    SetDlgItemTextW(dlg, MD_BGCOLOR, Hex6(s.bgColor).c_str());
+    static const int editIds[3] = { MD_TEXTCOLOR, MD_OUTLINE, MD_BGCOLOR };
+    for (int i = 0; i < 3; ++i) {
+        SendDlgItemMessageW(dlg, editIds[i], EM_LIMITTEXT, 7, 0);
+        UpdateSwatch(dlg, c, i);
+    }
+}
+
+static void SetupSettingsDlg(HWND dlg, SetCtx* c) {
+    // 左側選單
+    static const int navText[SP_COUNT] = { S_CAT_WINDOW, S_CAT_PRIO, S_CAT_CPU, S_M_MON, S_CAT_OTHER, S_ABOUT_TITLE };
+    for (int i = 0; i < SP_COUNT; ++i) SendDlgItemMessageW(dlg, SD_NAV, LB_ADDSTRING, 0, (LPARAM)T(navText[i]));
+    // 遊戲視窗
+    ComboAdd(dlg, SD_W_LOCKSTYLE, T(S_LOCKSTYLE_0), 0);
+    ComboAdd(dlg, SD_W_LOCKSTYLE, T(S_LOCKSTYLE_1), 1);
+    SendDlgItemMessageW(dlg, SD_W_MARGIN, EM_LIMITTEXT, 3, 0);
+    // 優先權 / 親和性 (由高到低)
+    for (int lv = 6; lv >= 1; --lv) {
+        ComboAdd(dlg, SD_P_CPU, PrioName(lv), lv);
+        ComboAdd(dlg, SD_P_GPU, PrioName(lv), lv);
+    }
+    for (int lv = 4; lv >= 1; --lv) ComboAdd(dlg, SD_P_IO, IoName(lv), lv);
+    {
+        HWND lv = GetDlgItem(dlg, SD_P_AFF);
+        ListView_SetExtendedListViewStyle(lv, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+        RECT rc;
+        GetClientRect(lv, &rc);
+        LVCOLUMNW col;
+        ZeroMemory(&col, sizeof(col));
+        col.mask = LVCF_WIDTH;
+        col.cx = std::max<int>(50, (int)rc.right - GetSystemMetrics(SM_CXVSCROLL) - 4);
+        SendMessageW(lv, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
+        int row = 0;
+        for (int i = 0; i < g_coreCount && i < 64; ++i) {
+            if (!((g_maskAll >> i) & 1)) continue;
+            wchar_t label[200];
+            std::wstring ct = CoreTypeText(i);
+            wsprintfW(label, T(S_CORE_ITEM), i, ct.c_str());
+            LVITEMW it;
+            ZeroMemory(&it, sizeof(it));
+            it.mask = LVIF_TEXT | LVIF_PARAM;
+            it.iItem = row;
+            it.pszText = label;
+            it.lParam = i;
+            SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&it);
+            ++row;
+        }
+    }
+    // CPU 限制
+    ComboAdd(dlg, SD_C_COND, T(S_C_ALWAYS), 1);
+    ComboAdd(dlg, SD_C_COND, T(S_C_MIN), 2);
+    ComboAdd(dlg, SD_C_COND, T(S_C_BG), 3);
+    for (int i = 0; i < kRatioCount; ++i) ComboAdd(dlg, SD_C_RATIO, ComboLabel(1, kRatios[i]).c_str(), kRatios[i]);
+    // 其他
+    ComboAdd(dlg, SD_O_DBL, T(S_DBL_SETTINGS), 0);
+    ComboAdd(dlg, SD_O_DBL, T(S_M_TOGGLE), 1);
+    ComboAdd(dlg, SD_O_DBL, T(S_DBL_CPU), 2);
+    ComboAdd(dlg, SD_O_DBL, T(S_DBL_MON), 3);
+    ComboAdd(dlg, SD_O_DBL, T(S_DBL_TASKBAR), 4);
+    ComboAdd(dlg, SD_O_LANG, T(S_L_AUTO), UL_AUTO);
+    for (int l = UL_ZHTW; l <= UL_KO; ++l) ComboAdd(dlg, SD_O_LANG, LangLabel(l), l);
+    LoadSetVals(dlg, c->base);
+    MonPageInit(dlg, c);
+    // 關於：診斷記錄用等寬字型、連結用底線字型
+    c->font = CreateFontW(-MulDiv(9, OverlayDpi(), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+    if (c->font) SendDlgItemMessageW(dlg, AB_LOG, WM_SETFONT, (WPARAM)c->font, TRUE);
+    {
+        HFONT base = (HFONT)SendMessageW(dlg, WM_GETFONT, 0, 0);
+        LOGFONTW lf;
+        if (base && GetObjectW(base, sizeof(lf), &lf)) {
+            lf.lfUnderline = TRUE;
+            c->linkFont = CreateFontIndirectW(&lf);
+            if (c->linkFont) SendDlgItemMessageW(dlg, AB_LINK, WM_SETFONT, (WPARAM)c->linkFont, TRUE);
+        }
+    }
+    SetTimer(dlg, 1, 1000, NULL);   // 診斷記錄每秒更新一次 (只在「關於」頁)
+    SelectPage(dlg, c, c->page);
+    SetFocus(GetDlgItem(dlg, SD_NAV));
+}
+
+static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
+    SetCtx* c = (SetCtx*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
     if (g_dragListMsg && msg == g_dragListMsg && c && lp) {
         DRAGLISTINFO* di = (DRAGLISTINFO*)lp;
         HWND lb = di->hWnd;
@@ -4278,69 +4820,73 @@ static INT_PTR CALLBACK MonDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
         return TRUE;
     }
     switch (msg) {
-    case WM_INITDIALOG: {
-        c = (MonDlgCtx*)lp;
+    case WM_INITDIALOG:
+        c = (SetCtx*)lp;
         SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)c);
+        g_setDlg = dlg;
         g_monDlgHwnd = dlg;
-        const OvSettings& s = c->before;
-        DlgSetChecked(dlg, MD_CPU, s.cpu);
-        DlgSetChecked(dlg, MD_CPU_PCT, s.cpuPct);
-        DlgSetChecked(dlg, MD_CPU_ACT, s.cpuGhz);
-        DlgSetChecked(dlg, MD_RAM, s.ram);
-        DlgSetChecked(dlg, MD_RAM_PCT, s.ramPct);
-        DlgSetChecked(dlg, MD_RAM_ACT, s.ramMb);
-        DlgSetChecked(dlg, MD_GPU, s.gpu);
-        DlgSetChecked(dlg, MD_VRAM, s.vram);
-        DlgSetChecked(dlg, MD_VRAM_PCT, s.vramPct);
-        DlgSetChecked(dlg, MD_VRAM_ACT, s.vramMb);
-        DlgSetChecked(dlg, MD_FPS, s.fps);
-        DlgSetChecked(dlg, MD_ENABLE, s.enabled);
-        DlgSetChecked(dlg, MD_LAT, s.latency);
-        DlgSetChecked(dlg, MD_LOCKNOBG, s.lockNoBg);
-        DlgSetChecked(dlg, MD_FGONLY, s.fgOnly);
-        DlgSetChecked(dlg, MD_LOCK, s.locked);
-        ComboAdd(dlg, MD_LAYOUT, T(S_MON_VERT), 0);
-        ComboAdd(dlg, MD_LAYOUT, T(S_MON_HORZ), 1);
-        SendDlgItemMessageW(dlg, MD_LAYOUT, CB_SETCURSEL, (WPARAM)(s.layout == 1 ? 1 : 0), 0);
-        SetDlgItemTextW(dlg, MD_SEP, s.separator.c_str());
-        SendDlgItemMessageW(dlg, MD_SEP, EM_LIMITTEXT, 12, 0);
-        EnableWindow(GetDlgItem(dlg, MD_SEP), s.layout == 1);   // 分隔文字只有橫式用得到
-        ComboAdd(dlg, MD_METHOD, T(S_METHOD_CYC), 0);
-        ComboAdd(dlg, MD_METHOD, T(S_METHOD_TIME), 1);
-        ComboAdd(dlg, MD_METHOD, T(S_METHOD_EST), 2);
-        SendDlgItemMessageW(dlg, MD_METHOD, CB_SETCURSEL, (WPARAM)((s.cpuMethod >= 0 && s.cpuMethod <= 2) ? s.cpuMethod : 0), 0);
-        ComboAdd(dlg, MD_LATMETHOD, T(S_LAT_SAMPLE), 0);
-        ComboAdd(dlg, MD_LATMETHOD, T(S_LAT_SMOOTH), 1);
-        SendDlgItemMessageW(dlg, MD_LATMETHOD, CB_SETCURSEL, (WPARAM)(s.latMethod == 1 ? 1 : 0), 0);
-        for (size_t i = 0; i < s.order.size(); ++i) {
-            LRESULT idx = SendDlgItemMessageW(dlg, MD_ORDER, LB_ADDSTRING, 0, (LPARAM)kOvItemNames[s.order[i]]);
-            SendDlgItemMessageW(dlg, MD_ORDER, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)s.order[i]);
-        }
-        MakeDragList(GetDlgItem(dlg, MD_ORDER));   // 可用滑鼠拖曳調整顯示順序
-        ComboFill(dlg, MD_INTERVAL, kOvIntervals, kOvIntervalCount, s.intervalMs, 2);
-        ComboFill(dlg, MD_FONT, kOvFontSizes, kOvFontCount, s.fontSize, 0);
-        ComboFill(dlg, MD_OPACITY, kOvOpacities, kOvOpacityCount, s.opacity, 1);
-        SetDlgItemTextW(dlg, MD_TEXTCOLOR, Hex6(s.textColor).c_str());
-        SetDlgItemTextW(dlg, MD_OUTLINE, Hex6(s.outlineColor).c_str());
-        SetDlgItemTextW(dlg, MD_BGCOLOR, Hex6(s.bgColor).c_str());
-        static const int editIds[3] = { MD_TEXTCOLOR, MD_OUTLINE, MD_BGCOLOR };
-        for (int i = 0; i < 3; ++i) {
-            SendDlgItemMessageW(dlg, editIds[i], EM_LIMITTEXT, 7, 0);
-            UpdateSwatch(dlg, c, i);
-        }
-        OverlayRefresh();   // 開啟設定視窗：固定顯示監控畫面 (預覽)
+        SetupSettingsDlg(dlg, c);
+        return FALSE;   // 焦點已自行設定
+    case WM_SD_SELPAGE:
+        if (c) SelectPage(dlg, c, (int)wp);
+        return TRUE;
+    case WM_MEASUREITEM: {   // 左側選單：每一項的高度
+        MEASUREITEMSTRUCT* mi = (MEASUREITEMSTRUCT*)lp;
+        if (mi->CtlID != SD_NAV) break;
+        mi->itemHeight = (UINT)MulDiv(24, OverlayDpi(), 96);
         return TRUE;
     }
+    case WM_DRAWITEM: {   // 左側選單：選取項目用反白色，文字垂直置中
+        const DRAWITEMSTRUCT* di = (const DRAWITEMSTRUCT*)lp;
+        if (di->CtlID != SD_NAV) break;
+        if ((int)di->itemID < 0) return TRUE;
+        bool sel = (di->itemState & ODS_SELECTED) != 0;
+        FillRect(di->hDC, &di->rcItem, GetSysColorBrush(sel ? COLOR_HIGHLIGHT : COLOR_WINDOW));
+        wchar_t txt[128] = L"";
+        SendMessageW(di->hwndItem, LB_GETTEXT, (WPARAM)di->itemID, (LPARAM)txt);
+        HFONT f = (HFONT)SendMessageW(di->hwndItem, WM_GETFONT, 0, 0);
+        HGDIOBJ old = f ? SelectObject(di->hDC, f) : NULL;
+        SetBkMode(di->hDC, TRANSPARENT);
+        SetTextColor(di->hDC, GetSysColor(sel ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT));
+        RECT tr = di->rcItem;
+        tr.left += MulDiv(8, OverlayDpi(), 96);
+        tr.right -= MulDiv(4, OverlayDpi(), 96);
+        DrawTextW(di->hDC, txt, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (old) SelectObject(di->hDC, old);
+        if ((di->itemState & ODS_FOCUS) && !(di->itemState & ODS_NOFOCUSRECT)) DrawFocusRect(di->hDC, &di->rcItem);
+        return TRUE;
+    }
+    case WM_TIMER:
+        if (c && c->page == SP_ABOUT) UpdateAboutLog(dlg, c);
+        return TRUE;
     case WM_CTLCOLORSTATIC: {
         int id = GetDlgCtrlID((HWND)lp);
         if (c && id == MD_TEXTSWATCH && c->sw[0]) return (INT_PTR)c->sw[0];
         if (c && id == MD_OUTSWATCH && c->sw[1]) return (INT_PTR)c->sw[1];
         if (c && id == MD_BGSWATCH && c->sw[2]) return (INT_PTR)c->sw[2];
+        if (id == AB_LINK) {   // 連結：藍色文字
+            HDC dc = (HDC)wp;
+            SetTextColor(dc, RGB(0, 102, 204));
+            SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
+            return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+        }
         break;
     }
+    case WM_SETCURSOR:   // 連結：滑鼠變成手形
+        if ((HWND)wp == GetDlgItem(dlg, AB_LINK) && IsWindowVisible((HWND)wp)) {
+            SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649)));   // IDC_HAND
+            SetWindowLongPtrW(dlg, DWLP_MSGRESULT, TRUE);
+            return TRUE;
+        }
+        break;
     case WM_COMMAND: {
         int id = LOWORD(wp);
         int code = HIWORD(wp);
+        if (id == SD_NAV && code == LBN_SELCHANGE) {
+            int sel = (int)SendDlgItemMessageW(dlg, SD_NAV, LB_GETCURSEL, 0, 0);
+            if (c && sel >= 0 && sel != c->page) SelectPage(dlg, c, sel);
+            return TRUE;
+        }
         if (id == MD_LAYOUT && code == CBN_SELCHANGE) {
             EnableWindow(GetDlgItem(dlg, MD_SEP), ComboValue(dlg, MD_LAYOUT, 0) == 1);
             return TRUE;
@@ -4351,12 +4897,20 @@ static INT_PTR CALLBACK MonDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             else if (id == MD_BGCOLOR) UpdateSwatch(dlg, c, 2);
             return TRUE;
         }
-        if (id == MD_APPLY) {
-            OvSettings s;
-            if (ReadMonDlg(dlg, s)) {
-                ApplyOvSettings(s);
-                OverlayRefresh();   // 立即變更監控畫面，尚未寫入 ini
+        if (id == SD_W_RESET && code == BN_CLICKED) {   // 重置視窗大小和位置：立即執行 (和選單相同)
+            HandleCommand(ID_RESET);
+            if (c) {
+                c->base.borderless = g_borderless;
+                DlgSetChecked(dlg, SD_W_BORDERLESS, g_borderless);
             }
+            return TRUE;
+        }
+        if ((id == SD_P_ALL || id == SD_P_P || id == SD_P_PNOHT || id == SD_P_E) && code == BN_CLICKED) {
+            unsigned long long m = (unsigned long long)g_maskAll;
+            if (id == SD_P_P) m = (unsigned long long)g_maskP;
+            else if (id == SD_P_PNOHT) m = (unsigned long long)g_maskPnoHT;
+            else if (id == SD_P_E) m = (unsigned long long)g_maskE;
+            AffListSet(GetDlgItem(dlg, SD_P_AFF), m);
             return TRUE;
         }
         if (id == MD_RESETPOS) {
@@ -4367,80 +4921,68 @@ static INT_PTR CALLBACK MonDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             OverlayRefresh();
             return TRUE;
         }
-        if (id == IDOK) {
-            OvSettings s;
-            if (!ReadMonDlg(dlg, s)) return TRUE;
-            ApplyOvSettings(s);
-            SaveOverlaySettings();   // 按下確定才寫入 ini
+        if (id == AB_LINK && code == 0) {   // STN_CLICKED
+            OpenUrl(APP_URL_WSTR);
+            return TRUE;
+        }
+        if (id == AB_COPY) {
+            CopyTextToClipboard(dlg, BuildDebugText());   // 立即複製目前的記錄
+            return TRUE;
+        }
+        if (id == AB_PAUSE && c) {
+            c->paused = !c->paused;
+            SetDlgItemTextW(dlg, AB_PAUSE, T(c->paused ? S_DLG_AUTO_UPDATE : S_DLG_STOP_UPDATE));
+            if (!c->paused) UpdateAboutLog(dlg, c);
+            return TRUE;
+        }
+        if (id == MD_APPLY && c) {
+            bool lc = false;
+            if (CommitSettings(dlg, c, false, &lc) && lc) {   // 變更語言後重新建立視窗，套用新語言
+                c->reopen = true;
+                EndDialog(dlg, IDRETRY);
+            }
+            return TRUE;
+        }
+        if (id == IDOK && c) {
+            bool lc = false;
+            if (!CommitSettings(dlg, c, true, &lc)) return TRUE;
             EndDialog(dlg, IDOK);
             return TRUE;
         }
         if (id == IDCANCEL) {
-            if (c) ApplyOvSettings(c->before);   // 回復到開啟視窗之前的狀態
+            if (c) ApplyOvSettings(c->before);   // 監控設定回復到開啟視窗之前的狀態
             EndDialog(dlg, IDCANCEL);
             return TRUE;
         }
         break;
     }
     case WM_DESTROY:
+        KillTimer(dlg, 1);
         if (c) {
             for (int i = 0; i < 3; ++i) {
                 if (c->sw[i]) DeleteObject(c->sw[i]);
                 c->sw[i] = NULL;
             }
+            if (c->font) {
+                DeleteObject(c->font);
+                c->font = NULL;
+            }
+            if (c->linkFont) {
+                DeleteObject(c->linkFont);
+                c->linkFont = NULL;
+            }
         }
         g_monDlgHwnd = NULL;
+        g_setDlg = NULL;
+        g_monPreview = false;
+        g_ovDebug = false;
         break;
     }
     return FALSE;
 }
 
-static void TmplAlign(std::vector<WORD>& v) {
-    if (v.size() & 1) v.push_back(0);
-}
-
-static void TmplStr(std::vector<WORD>& v, const wchar_t* s) {
-    while (*s) v.push_back((WORD)*s++);
-    v.push_back(0);
-}
-
-static void TmplItem(std::vector<WORD>& v, DWORD style, short x, short y, short cx, short cy, WORD id, WORD classAtom, const wchar_t* text) {
-    TmplAlign(v);
-    v.push_back((WORD)(style & 0xFFFF));
-    v.push_back((WORD)(style >> 16));
-    v.push_back(0);
-    v.push_back(0);   // 擴充樣式
-    v.push_back((WORD)x);
-    v.push_back((WORD)y);
-    v.push_back((WORD)cx);
-    v.push_back((WORD)cy);
-    v.push_back(id);
-    v.push_back(0xFFFF);
-    v.push_back(classAtom);   // 0x0080 按鈕、0x0081 編輯、0x0082 靜態文字、0x0085 下拉式方塊
-    TmplStr(v, text);
-    v.push_back(0);   // 沒有建立資料
-}
-
-static HWND g_aboutDlg = NULL;   // 「關於」視窗 (開著時不開監控設定)
-
-static void ShowMonitorSettings() {
-    if (g_monDlgOpen) {
-        if (g_monDlgHwnd) SetForegroundWindow(g_monDlgHwnd);
-        return;
-    }
-    if (g_aboutDlg) {
-        SetForegroundWindow(g_aboutDlg);
-        return;
-    }
-    MonDlgCtx ctx;
-    ctx.before = CaptureOv();
-    ctx.sw[0] = ctx.sw[1] = ctx.sw[2] = NULL;
-    ctx.dragIdx = -1;
-    ctx.insertPos = -1;
-    if (!g_dragListMsg) g_dragListMsg = RegisterWindowMessageW(L"commctrl_DragListMsg");
-
-    const WORD BTN = 0x0080, EDT = 0x0081, STC = 0x0082, CMB = 0x0085, NOID = 0xFFFF;
-    std::vector<WORD> t;
+static void BuildSettingsTemplate(std::vector<WORD>& t, SetCtx* c) {
+    const WORD BTN = 0x0080, EDT = 0x0081, STC = 0x0082, LST = 0x0083, CMB = 0x0085, NOID = 0xFFFF;
     DWORD style = DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND | WS_POPUP | WS_CAPTION | WS_SYSMENU;
     t.push_back((WORD)(style & 0xFFFF));
     t.push_back((WORD)(style >> 16));
@@ -4450,91 +4992,206 @@ static void ShowMonitorSettings() {
     t.push_back(0);                 // 控制項數量 (稍後填入)
     t.push_back(0);
     t.push_back(0);                 // x, y
-    t.push_back(330);
+    t.push_back(416);
     t.push_back(396);               // cx, cy (對話框單位)
     t.push_back(0);                 // 選單
     t.push_back(0);                 // 類別
-    TmplStr(t, T(S_DLG_MON_TITLE));
+    TmplStr(t, T(S_SET_TITLE));
     t.push_back(9);                 // 字型大小
     TmplStr(t, L"Segoe UI");
 
     int n = 0;
-    auto add = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) {
+    WORD autoId = SD_AUTO_BASE;
+    // 一般控制項：page = 所屬頁面 (-1 = 每頁都顯示)；頁面內容的 x 座標以 8 ~ 322 計算，這裡再往右移 (留出左側選單的位置)
+    auto raw = [&](int page, DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) {
+        if (id == NOID) id = autoId++;
         TmplItem(t, WS_CHILD | WS_VISIBLE | st, (short)x, (short)y, (short)cx, (short)cy, id, cls, text);
         ++n;
+        c->pageOf.push_back(std::make_pair(id, page));
+    };
+    const int OX = 86;
+    auto pg = [&](int page, DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) {
+        raw(page, st, x + OX, y, cx, cy, id, cls, text);
     };
     const DWORD CHK = BS_AUTOCHECKBOX | WS_TABSTOP;
     const DWORD COMBO = WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST;
     const DWORD HEXEDIT = WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL | ES_UPPERCASE;
     const DWORD HEXEDIT_PLAIN = WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL;
-
-    const WORD LST = 0x0083;
     const DWORD LISTBOX = LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_BORDER | WS_TABSTOP;
 
+    // 左側選單
+    raw(-1, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_BORDER | WS_TABSTOP, 8, 8, 78, 358, SD_NAV, LST, L"");   // 自行繪製：文字垂直置中
+
+    // ---- 遊戲視窗 ----
+    auto win = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_WINDOW, st, x, y, cx, cy, id, cls, text); };
+    win(BS_GROUPBOX, 8, 6, 314, 134, NOID, BTN, T(S_G_WINDOW));
+    win(CHK, 16, 20, 298, 12, SD_W_BORDERLESS, BTN, T(S_BORDERLESS));
+    win(CHK, 16, 36, 298, 12, SD_W_LOCK, BTN, T(S_M_LOCK));
+    win(SS_LEFT, 30, 54, 70, 10, NOID, STC, T(S_LOCKSTYLE));
+    win(COMBO, 102, 52, 210, 80, SD_W_LOCKSTYLE, CMB, L"");
+    win(CHK, 16, 72, 298, 12, SD_W_HIDETB, BTN, T(S_M_HIDE_TASKBAR));
+    win(BS_PUSHBUTTON | WS_TABSTOP, 16, 90, 170, 14, SD_W_RESET, BTN, T(S_M_RESET));
+    win(SS_LEFT, 16, 110, 298, 26, NOID, STC, T(S_NOTE_WINDOWED));
+    win(BS_GROUPBOX, 8, 146, 314, 92, NOID, BTN, T(S_G_MOUSE));
+    win(CHK, 16, 160, 298, 12, SD_W_CLIP, BTN, T(S_M_MOUSE_CLIP));
+    win(SS_LEFT, 30, 178, 100, 10, NOID, STC, T(S_CLIP_MARGIN));
+    win(HEXEDIT_PLAIN | ES_NUMBER, 134, 176, 36, 12, SD_W_MARGIN, EDT, L"");
+    win(SS_LEFT, 176, 178, 60, 10, NOID, STC, T(S_CLIP_RANGE));
+    win(CHK, 30, 194, 284, 12, SD_W_CLIPBL, BTN, T(S_CLIP_BL));
+    win(SS_LEFT, 16, 214, 298, 20, NOID, STC, T(S_TIP_FULLSCREEN));
+
+    // ---- 優先權 / 親和性 ----
+    auto pri = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_PRIO, st, x, y, cx, cy, id, cls, text); };
+    pri(BS_GROUPBOX, 8, 6, 314, 70, NOID, BTN, T(S_G_PRIO));
+    pri(SS_LEFT, 16, 22, 96, 10, NOID, STC, T(S_M_CPUPRIO));
+    pri(COMBO, 116, 20, 196, 100, SD_P_CPU, CMB, L"");
+    pri(SS_LEFT, 16, 40, 96, 10, NOID, STC, T(S_M_GPUPRIO));
+    pri(COMBO, 116, 38, 196, 100, SD_P_GPU, CMB, L"");
+    pri(SS_LEFT, 16, 58, 96, 10, NOID, STC, T(S_M_IOPRIO));
+    pri(COMBO, 116, 56, 196, 100, SD_P_IO, CMB, L"");
+    pri(BS_GROUPBOX, 8, 80, 314, 238, NOID, BTN, T(S_M_CPUAFF));
+    pri(BS_PUSHBUTTON | WS_TABSTOP, 16, 94, 150, 14, SD_P_ALL, BTN, T(S_AFF_ALL));
+    if (g_hybrid) {
+        pri(BS_PUSHBUTTON | WS_TABSTOP, 170, 94, 150, 14, SD_P_P, BTN, T(S_AFF_P));
+        pri(BS_PUSHBUTTON | WS_TABSTOP, 16, 110, 150, 14, SD_P_PNOHT, BTN, TS(S_AFF_PNOHT).c_str());
+        pri(BS_PUSHBUTTON | WS_TABSTOP, 170, 110, 150, 14, SD_P_E, BTN, T(S_AFF_E));
+    } else if (g_maskPnoHT != g_maskAll) {
+        pri(BS_PUSHBUTTON | WS_TABSTOP, 170, 94, 150, 14, SD_P_PNOHT, BTN, TS(S_AFF_NOHT).c_str());   // 有超執行緒 / SMT 的一般 CPU
+    }
+    {
+        TmplItemCls(t, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                    (short)(16 + OX), 128, 298, 184, SD_P_AFF, L"SysListView32", L"");
+        ++n;
+        c->pageOf.push_back(std::make_pair((WORD)SD_P_AFF, (int)SP_PRIO));
+    }
+    pri(CHK, 8, 324, 314, 12, SD_P_TIP, BTN, T(S_M_TIPSHOW));
+
+    // ---- CPU 限制 ----
+    auto cpu = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_CPU, st, x, y, cx, cy, id, cls, text); };
+    cpu(BS_GROUPBOX, 8, 6, 314, 96, NOID, BTN, T(S_M_LIMIT));
+    cpu(CHK, 16, 20, 298, 12, SD_C_ENABLE, BTN, T(S_M_ENABLE));
+    cpu(CHK, 16, 36, 298, 12, SD_C_ECO, BTN, T(S_M_ECO));
+    cpu(SS_LEFT, 16, 58, 96, 10, NOID, STC, T(S_M_COND));
+    cpu(COMBO, 116, 56, 196, 80, SD_C_COND, CMB, L"");
+    cpu(SS_LEFT, 16, 76, 96, 10, NOID, STC, T(S_M_RATIO));
+    cpu(COMBO, 116, 74, 90, 100, SD_C_RATIO, CMB, L"");
+
+    // ---- 效能監控 ----
+    auto mon = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_MON, st, x, y, cx, cy, id, cls, text); };
     // 啟用監控 (最上方)
-    add(CHK, 8, 6, 250, 12, MD_ENABLE, BTN, T(S_MON_ENABLE));
+    mon(CHK, 8, 6, 250, 12, MD_ENABLE, BTN, T(S_MON_ENABLE));
 
     // 顯示項目 (左) 與顯示順序 (右，用滑鼠拖曳調整)
-    add(BS_GROUPBOX, 8, 22, 212, 106, NOID, BTN, T(S_MON_ITEMS));
-    add(CHK, 14, 36, 38, 12, MD_CPU, BTN, L"CPU");
-    add(CHK, 54, 36, 44, 12, MD_CPU_PCT, BTN, T(S_MON_PCT));
-    add(CHK, 100, 36, 116, 12, MD_CPU_ACT, BTN, T(S_MON_ACTUAL_GHZ));
-    add(CHK, 14, 50, 38, 12, MD_RAM, BTN, L"RAM");
-    add(CHK, 54, 50, 44, 12, MD_RAM_PCT, BTN, T(S_MON_PCT));
-    add(CHK, 100, 50, 116, 12, MD_RAM_ACT, BTN, T(S_MON_ACTUAL_MB));
-    add(CHK, 14, 64, 100, 12, MD_GPU, BTN, L"GPU");
-    add(CHK, 14, 78, 38, 12, MD_VRAM, BTN, L"VRAM");
-    add(CHK, 54, 78, 44, 12, MD_VRAM_PCT, BTN, T(S_MON_PCT));
-    add(CHK, 100, 78, 116, 12, MD_VRAM_ACT, BTN, T(S_MON_ACTUAL_MB));
-    add(CHK, 14, 92, 100, 12, MD_FPS, BTN, L"FPS");
-    add(CHK, 14, 106, 100, 12, MD_LAT, BTN, L"Latency");
-    add(BS_GROUPBOX, 224, 22, 98, 106, NOID, BTN, T(S_MON_ORDER));
-    add(LISTBOX, 230, 36, 86, 86, MD_ORDER, LST, L"");
+    mon(BS_GROUPBOX, 8, 22, 212, 106, NOID, BTN, T(S_MON_ITEMS));
+    mon(CHK, 14, 36, 38, 12, MD_CPU, BTN, L"CPU");
+    mon(CHK, 54, 36, 44, 12, MD_CPU_PCT, BTN, T(S_MON_PCT));
+    mon(CHK, 100, 36, 116, 12, MD_CPU_ACT, BTN, T(S_MON_ACTUAL_GHZ));
+    mon(CHK, 14, 50, 38, 12, MD_RAM, BTN, L"RAM");
+    mon(CHK, 54, 50, 44, 12, MD_RAM_PCT, BTN, T(S_MON_PCT));
+    mon(CHK, 100, 50, 116, 12, MD_RAM_ACT, BTN, T(S_MON_ACTUAL_MB));
+    mon(CHK, 14, 64, 100, 12, MD_GPU, BTN, L"GPU");
+    mon(CHK, 14, 78, 38, 12, MD_VRAM, BTN, L"VRAM");
+    mon(CHK, 54, 78, 44, 12, MD_VRAM_PCT, BTN, T(S_MON_PCT));
+    mon(CHK, 100, 78, 116, 12, MD_VRAM_ACT, BTN, T(S_MON_ACTUAL_MB));
+    mon(CHK, 14, 92, 100, 12, MD_FPS, BTN, L"FPS");
+    mon(CHK, 14, 106, 100, 12, MD_LAT, BTN, L"Latency");
+    mon(BS_GROUPBOX, 224, 22, 98, 106, NOID, BTN, T(S_MON_ORDER));
+    mon(LISTBOX, 230, 36, 86, 86, MD_ORDER, LST, L"");
 
     // 顯示設定：排列方式 (橫式可設定分隔文字)、更新頻率、CPU 使用率算法
-    add(BS_GROUPBOX, 8, 130, 314, 84, NOID, BTN, T(S_MON_DISPLAY));
-    add(SS_LEFT, 16, 144, 68, 10, NOID, STC, T(S_MON_LAYOUT));
-    add(COMBO, 88, 142, 100, 80, MD_LAYOUT, CMB, L"");
-    add(SS_LEFT, 194, 144, 44, 10, NOID, STC, T(S_MON_SEPARATOR));
-    add(HEXEDIT_PLAIN, 240, 142, 72, 12, MD_SEP, EDT, L"");
-    add(SS_LEFT, 16, 162, 68, 10, NOID, STC, T(S_MON_INTERVAL));
-    add(COMBO, 88, 160, 224, 80, MD_INTERVAL, CMB, L"");
-    add(SS_LEFT, 16, 180, 68, 10, NOID, STC, T(S_MON_METHOD));
-    add(COMBO, 88, 178, 224, 80, MD_METHOD, CMB, L"");
-    add(SS_LEFT, 16, 198, 68, 10, NOID, STC, T(S_MON_LATMETHOD));
-    add(COMBO, 88, 196, 224, 80, MD_LATMETHOD, CMB, L"");
+    mon(BS_GROUPBOX, 8, 130, 314, 84, NOID, BTN, T(S_MON_DISPLAY));
+    mon(SS_LEFT, 16, 144, 68, 10, NOID, STC, T(S_MON_LAYOUT));
+    mon(COMBO, 88, 142, 100, 80, MD_LAYOUT, CMB, L"");
+    mon(SS_LEFT, 194, 144, 44, 10, NOID, STC, T(S_MON_SEPARATOR));
+    mon(HEXEDIT_PLAIN, 240, 142, 72, 12, MD_SEP, EDT, L"");
+    mon(SS_LEFT, 16, 162, 68, 10, NOID, STC, T(S_MON_INTERVAL));
+    mon(COMBO, 88, 160, 224, 80, MD_INTERVAL, CMB, L"");
+    mon(SS_LEFT, 16, 180, 68, 10, NOID, STC, T(S_MON_METHOD));
+    mon(COMBO, 88, 178, 224, 80, MD_METHOD, CMB, L"");
+    mon(SS_LEFT, 16, 198, 68, 10, NOID, STC, T(S_MON_LATMETHOD));
+    mon(COMBO, 88, 196, 224, 80, MD_LATMETHOD, CMB, L"");
 
     // 外觀
-    add(BS_GROUPBOX, 8, 218, 314, 114, NOID, BTN, T(S_MON_STYLE));
-    add(SS_LEFT, 16, 234, 90, 10, NOID, STC, T(S_MON_FONTSIZE));
-    add(COMBO, 110, 232, 90, 80, MD_FONT, CMB, L"");
-    add(SS_LEFT, 16, 250, 90, 10, NOID, STC, T(S_LBL_TEXTCOLOR));
-    add(HEXEDIT, 110, 248, 52, 12, MD_TEXTCOLOR, EDT, L"");
-    add(WS_BORDER | SS_LEFT, 168, 248, 14, 12, MD_TEXTSWATCH, STC, L"");
-    add(SS_LEFT, 16, 266, 90, 10, NOID, STC, T(S_LBL_OUTLINECOLOR));
-    add(HEXEDIT, 110, 264, 52, 12, MD_OUTLINE, EDT, L"");
-    add(WS_BORDER | SS_LEFT, 168, 264, 14, 12, MD_OUTSWATCH, STC, L"");
-    add(SS_LEFT, 16, 282, 90, 10, NOID, STC, T(S_MON_OPACITY));
-    add(COMBO, 110, 280, 90, 80, MD_OPACITY, CMB, L"");
-    add(SS_LEFT, 16, 298, 90, 10, NOID, STC, T(S_LBL_BGCOLOR));
-    add(HEXEDIT, 110, 296, 52, 12, MD_BGCOLOR, EDT, L"");
-    add(WS_BORDER | SS_LEFT, 168, 296, 14, 12, MD_BGSWATCH, STC, L"");
-    add(CHK, 16, 312, 290, 12, MD_LOCKNOBG, BTN, T(S_MON_LOCKNOBG));
+    mon(BS_GROUPBOX, 8, 218, 314, 114, NOID, BTN, T(S_MON_STYLE));
+    mon(SS_LEFT, 16, 234, 90, 10, NOID, STC, T(S_MON_FONTSIZE));
+    mon(COMBO, 110, 232, 90, 80, MD_FONT, CMB, L"");
+    mon(SS_LEFT, 16, 250, 90, 10, NOID, STC, T(S_LBL_TEXTCOLOR));
+    mon(HEXEDIT, 110, 248, 52, 12, MD_TEXTCOLOR, EDT, L"");
+    mon(WS_BORDER | SS_LEFT, 168, 248, 14, 12, MD_TEXTSWATCH, STC, L"");
+    mon(SS_LEFT, 16, 266, 90, 10, NOID, STC, T(S_LBL_OUTLINECOLOR));
+    mon(HEXEDIT, 110, 264, 52, 12, MD_OUTLINE, EDT, L"");
+    mon(WS_BORDER | SS_LEFT, 168, 264, 14, 12, MD_OUTSWATCH, STC, L"");
+    mon(SS_LEFT, 16, 282, 90, 10, NOID, STC, T(S_MON_OPACITY));
+    mon(COMBO, 110, 280, 90, 80, MD_OPACITY, CMB, L"");
+    mon(SS_LEFT, 16, 298, 90, 10, NOID, STC, T(S_LBL_BGCOLOR));
+    mon(HEXEDIT, 110, 296, 52, 12, MD_BGCOLOR, EDT, L"");
+    mon(WS_BORDER | SS_LEFT, 168, 296, 14, 12, MD_BGSWATCH, STC, L"");
+    mon(CHK, 16, 312, 290, 12, MD_LOCKNOBG, BTN, T(S_MON_LOCKNOBG));
 
     // 其他
-    add(CHK, 8, 338, 314, 12, MD_FGONLY, BTN, T(S_MON_FGONLY_DLG));
-    add(CHK, 8, 354, 220, 12, MD_LOCK, BTN, T(S_MON_LOCK));
-    add(BS_PUSHBUTTON | WS_TABSTOP, 236, 352, 86, 14, MD_RESETPOS, BTN, T(S_MON_RESETPOS));
+    mon(CHK, 8, 338, 314, 12, MD_FGONLY, BTN, T(S_MON_FGONLY_DLG));
+    mon(CHK, 8, 354, 220, 12, MD_LOCK, BTN, T(S_MON_LOCK));
+    mon(BS_PUSHBUTTON | WS_TABSTOP, 236, 352, 86, 14, MD_RESETPOS, BTN, T(S_MON_RESETPOS));
 
-    // 確定 / 取消 / 套用
-    add(BS_DEFPUSHBUTTON | WS_TABSTOP, 170, 374, 48, 14, IDOK, BTN, T(S_DLG_OK));
-    add(BS_PUSHBUTTON | WS_TABSTOP, 222, 374, 48, 14, IDCANCEL, BTN, T(S_DLG_CANCEL));
-    add(BS_PUSHBUTTON | WS_TABSTOP, 274, 374, 48, 14, MD_APPLY, BTN, T(S_DLG_APPLY));
+    // ---- 其他 ----
+    auto oth = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_OTHER, st, x, y, cx, cy, id, cls, text); };
+    oth(SS_LEFT, 8, 12, 120, 10, NOID, STC, T(S_M_DBLCLICK));
+    oth(COMBO, 132, 10, 190, 100, SD_O_DBL, CMB, L"");
+    oth(SS_LEFT, 8, 32, 120, 10, NOID, STC, T(S_M_LANG));
+    oth(COMBO, 132, 30, 190, 100, SD_O_LANG, CMB, L"");
+
+    // ---- 關於 ----
+    auto abt = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_ABOUT, st, x, y, cx, cy, id, cls, text); };
+    std::wstring verText = L"Mabinogi Client Manager  v" APP_VERSION_WSTR;
+    const DWORD LOGEDIT = ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL | WS_BORDER | WS_TABSTOP;
+    abt(BS_GROUPBOX, 8, 6, 314, 120, NOID, BTN, T(S_ABOUT_GROUP));
+    abt(SS_LEFT, 14, 18, 302, 10, NOID, STC, verText.c_str());
+    abt(SS_LEFT | SS_NOTIFY, 14, 29, 175, 10, AB_LINK, STC, APP_URL_WSTR);   // 版本號下一行：GitHub 連結 (點了開啟網址)
+    abt(SS_LEFT, 14, 44, 302, 78, NOID, STC, T(S_ABOUT_TEXT));
+    abt(BS_GROUPBOX, 8, 130, 314, 226, NOID, BTN, T(S_MON_DEBUG));
+    abt(LOGEDIT, 14, 142, 302, 190, AB_LOG, EDT, L"");
+    abt(BS_PUSHBUTTON | WS_TABSTOP, 14, 336, 50, 14, AB_COPY, BTN, T(S_DLG_COPY));
+    abt(BS_PUSHBUTTON | WS_TABSTOP, 68, 336, 64, 14, AB_PAUSE, BTN, T(S_DLG_STOP_UPDATE));
+
+    // ---- 確定 / 取消 / 套用 (每頁都顯示) ----
+    raw(-1, BS_DEFPUSHBUTTON | WS_TABSTOP, 256, 374, 48, 14, IDOK, BTN, T(S_DLG_OK));
+    raw(-1, BS_PUSHBUTTON | WS_TABSTOP, 308, 374, 48, 14, IDCANCEL, BTN, T(S_DLG_CANCEL));
+    raw(-1, BS_PUSHBUTTON | WS_TABSTOP, 360, 374, 48, 14, MD_APPLY, BTN, T(S_DLG_APPLY));
     t[cditPos] = (WORD)n;
+}
 
+static void ShowSettingsDialog() {
+    if (g_setDlg) {
+        SetForegroundWindow(g_setDlg);
+        return;
+    }
+    SetCtx ctx;
+    ctx.before = CaptureOv();   // 開啟視窗時的監控設定 (按取消時回復)
+    ctx.sw[0] = ctx.sw[1] = ctx.sw[2] = NULL;
+    ctx.dragIdx = -1;
+    ctx.insertPos = -1;
+    ctx.page = SP_WINDOW;
+    ctx.font = NULL;
+    ctx.linkFont = NULL;
+    ctx.paused = false;
+    ctx.reopen = false;
+    if (!g_dragListMsg) g_dragListMsg = RegisterWindowMessageW(L"commctrl_DragListMsg");
     g_monDlgOpen = true;
-    DialogBoxIndirectParamW(g_hInst, (LPCDLGTEMPLATEW)t.data(), g_hWnd, MonDlgProc, (LPARAM)&ctx);
+    for (;;) {
+        ctx.monBase = CaptureOv();
+        ctx.base = CaptureSetVals();
+        ctx.lastLog.clear();
+        ctx.reopen = false;
+        ctx.pageOf.clear();
+        ctx.insertPos = -1;
+        std::vector<WORD> t;
+        BuildSettingsTemplate(t, &ctx);
+        INT_PTR r = DialogBoxIndirectParamW(g_hInst, (LPCDLGTEMPLATEW)t.data(), g_hWnd, SettingsDlgProc, (LPARAM)&ctx);
+        if (!(r == IDRETRY && ctx.reopen)) break;
+    }
     g_monDlgOpen = false;
+    g_monPreview = false;
+    g_ovDebug = false;
     OverlayRefresh();   // 關閉後依「只在遊戲前景時顯示」等設定重新判斷
 }
 
@@ -4547,16 +5204,11 @@ static void BuildMonitorMenu(HMENU parent) {
     HMENU mon = CreatePopupMenu();
     AppendMenuW(mon, MF_STRING | Chk(g_ovEnabled), ID_OV_ENABLE, T(S_MON_ENABLE));
     AppendMenuW(mon, MF_STRING | Chk(g_ovLocked), ID_OV_LOCK, T(S_MON_LOCK));
-    AppendMenuW(mon, MF_STRING, ID_OV_SETTINGS, T(S_MON_SETTINGS));
     AppendMenuW(parent, MF_POPUP, (UINT_PTR)mon, T(S_M_MON));
 }
 
 static void HandleOverlayCommand(int id) {
-    if (id == ID_OV_SETTINGS) {
-        ShowMonitorSettings();
-        return;
-    }
-    if (g_monDlgOpen) {   // 設定視窗開啟期間，其他監控選項請在視窗內調整
+    if (g_monDlgOpen) {   // 設定視窗開啟期間，監控選項請在設定視窗內調整
         if (g_monDlgHwnd) SetForegroundWindow(g_monDlgHwnd);
         return;
     }
@@ -4634,198 +5286,147 @@ static void ShowNoGameDialog() {
     else if (r == 102) StartRestart(true);
 }
 
-// 連點兩下通知區域圖示：先確認遊戲是否在執行，沒有就顯示上面的提示視窗
+// ---------------------------------------------------------------------------
+//  圖示上方的短暫提示：連點兩下圖示切換功能後，在通知區域圖示附近顯示「項目：已啟用 / 已關閉」，約 1.8 秒後自動消失
+//  (使用標準的 tooltips_class32 追蹤式提示框，不使用系統的「通知」，所以不會被專注輔助或通知設定擋掉)
+// ---------------------------------------------------------------------------
+static HWND g_toastTip = NULL;
+static bool g_toastShown = false;
+static std::wstring g_toastText;
+
+static void HideToast() {
+    if (g_hWnd) KillTimer(g_hWnd, 8);
+    if (!g_toastTip || !g_toastShown) return;
+    TTTOOLINFOW ti;
+    ZeroMemory(&ti, sizeof(ti));
+    ti.cbSize = TTTOOLINFOW_V1_SIZE;
+    ti.hwnd = g_hWnd;
+    ti.uId = 2;
+    SendMessageW(g_toastTip, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
+    g_toastShown = false;
+}
+
+static void ShowToast(const std::wstring& text) {
+    if (!g_toastTip) {
+        g_toastTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g_hWnd, NULL, g_hInst, NULL);
+        if (!g_toastTip) return;
+        TTTOOLINFOW ti0;
+        ZeroMemory(&ti0, sizeof(ti0));
+        ti0.cbSize = TTTOOLINFOW_V1_SIZE;
+        ti0.uFlags = TTF_TRACK | TTF_ABSOLUTE;   // 追蹤式提示框：位置由我們指定
+        ti0.hwnd = g_hWnd;
+        ti0.uId = 2;
+        ti0.lpszText = (LPWSTR)L"";
+        SendMessageW(g_toastTip, TTM_ADDTOOLW, 0, (LPARAM)&ti0);
+        SendMessageW(g_toastTip, TTM_SETMAXTIPWIDTH, 0, MulDiv(400, OverlayDpi(), 96));
+    }
+    g_toastText = text;
+    TTTOOLINFOW ti;
+    ZeroMemory(&ti, sizeof(ti));
+    ti.cbSize = TTTOOLINFOW_V1_SIZE;
+    ti.hwnd = g_hWnd;
+    ti.uId = 2;
+    ti.lpszText = (LPWSTR)g_toastText.c_str();
+    SendMessageW(g_toastTip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+
+    // 錨點：通知區域圖示 (取不到時用滑鼠位置：連點兩下的當下滑鼠就在圖示上)
+    int dpi = OverlayDpi();
+    RECT ic;
+    NOTIFYICONIDENTIFIER nii;
+    ZeroMemory(&nii, sizeof(nii));
+    nii.cbSize = sizeof(nii);
+    nii.hWnd = g_hWnd;
+    nii.uID = 1;
+    if (!SUCCEEDED(Shell_NotifyIconGetRect(&nii, &ic))) {
+        POINT p;
+        GetCursorPos(&p);
+        ic.left = ic.right = p.x;
+        ic.top = ic.bottom = p.y;
+    }
+    // 提示框大小
+    // (舊版 comctl32 v5.82 不支援 TTM_GETBUBBLESIZE，用字型量測文字寬度來估計，做法同選單提示)
+    HFONT f = (HFONT)SendMessageW(g_toastTip, WM_GETFONT, 0, 0);
+    HDC dc = GetDC(NULL);
+    HGDIOBJ oldf = f ? SelectObject(dc, f) : NULL;
+    SIZE sz = { 0, 0 };
+    GetTextExtentPoint32W(dc, g_toastText.c_str(), (int)g_toastText.size(), &sz);
+    if (oldf) SelectObject(dc, oldf);
+    ReleaseDC(NULL, dc);
+    int tw = sz.cx + MulDiv(16, dpi, 96), th = sz.cy + MulDiv(10, dpi, 96);
+    // 工作列在哪一邊，就把提示框放在圖示的內側 (工作列在下方 = 顯示在圖示上方)
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromRect(&ic, MONITOR_DEFAULTTONEAREST), &mi);
+    int dl = (int)(ic.left - mi.rcMonitor.left), dr = (int)(mi.rcMonitor.right - ic.right);
+    int dt = (int)(ic.top - mi.rcMonitor.top), db = (int)(mi.rcMonitor.bottom - ic.bottom);
+    int mn = std::min(std::min(dl, dr), std::min(dt, db));
+    int gap = MulDiv(6, dpi, 96);
+    int cx = (int)((ic.left + ic.right) / 2), cy = (int)((ic.top + ic.bottom) / 2);
+    int x, y;
+    if (mn == db) {
+        x = cx - tw / 2;
+        y = (int)ic.top - th - gap;
+    } else if (mn == dt) {
+        x = cx - tw / 2;
+        y = (int)ic.bottom + gap;
+    } else if (mn == dl) {
+        x = (int)ic.right + gap;
+        y = cy - th / 2;
+    } else {
+        x = (int)ic.left - tw - gap;
+        y = cy - th / 2;
+    }
+    int margin = MulDiv(4, dpi, 96);
+    if (x + tw > mi.rcMonitor.right - margin) x = (int)mi.rcMonitor.right - margin - tw;
+    if (x < mi.rcMonitor.left + margin) x = (int)mi.rcMonitor.left + margin;
+    if (y + th > mi.rcMonitor.bottom - margin) y = (int)mi.rcMonitor.bottom - margin - th;
+    if (y < mi.rcMonitor.top + margin) y = (int)mi.rcMonitor.top + margin;
+    SendMessageW(g_toastTip, TTM_TRACKPOSITION, 0, MAKELPARAM(x, y));
+    SendMessageW(g_toastTip, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+    g_toastShown = true;
+    SetTimer(g_hWnd, 8, 1800, NULL);   // 重複設定 = 重新計時
+}
+
+// 「項目：已啟用 / 已關閉」
+static void ToastState(int nameId, bool on) {
+    wchar_t b[256];
+    wsprintfW(b, T(on ? S_TOAST_ON : S_TOAST_OFF), T(nameId));
+    ShowToast(b);
+}
+
+// 連點兩下通知區域圖示：依設定的動作執行。
+// 「開啟設定頁面」不需要遊戲；其他動作先確認遊戲是否在執行 (沒有就顯示提示視窗)，
+// 切換後在圖示上方短暫顯示該項目目前是啟用還是關閉 (動作沒有生效時不顯示)。
 static void OnTrayDoubleClick() {
+    int a = g_dblAction;
+    if (a == 0) {
+        ShowSettingsDialog();
+        return;
+    }
     if (GetClientPids().empty()) {
         ShowNoGameDialog();
         return;
     }
-    int a = g_dblAction;
     if (a == 1) {
+        bool before = g_borderless;
+        ToggleBorderless();
+        if (g_borderless != before) ToastState(S_BORDERLESS, g_borderless);
+    } else if (a == 2) {
         g_cpuEnabled = !g_cpuEnabled;
         SaveInt(L"CpuEnabled", g_cpuEnabled ? 1 : 0);
         WakeEngine();
-    } else if (a == 2) {
-        HandleOverlayCommand(ID_OV_ENABLE);
-    } else {
-        ToggleBorderless();
+        ToastState(S_M_LIMIT, g_cpuEnabled);
+    } else if (a == 3) {
+        bool before = g_ovEnabled;
+        HandleOverlayCommand(ID_OV_ENABLE);   // 設定視窗開啟時不會切換 (和選單相同)
+        if (g_ovEnabled != before) ToastState(S_M_MON, g_ovEnabled);
+    } else if (a == 4) {
+        bool before = g_hideTaskbar;
+        HandleCommand(ID_HIDE_TASKBAR);
+        if (g_hideTaskbar != before) ToastState(S_M_HIDE_TASKBAR, g_hideTaskbar);
     }
-}
-// ---------------------------------------------------------------------------
-//  關於視窗：程式說明 + 診斷記錄
-//  診斷記錄只在這個視窗開啟期間收集 (不寫入檔案)，預設自動更新，可按「停止更新」手動暫停；
-//  在記錄區塊內選取文字、或捲動捲軸時也會暫停，回到最上方 / 最左邊且沒有選取時才恢復自動更新
-// ---------------------------------------------------------------------------
-enum { AB_LOG = 3001, AB_COPY, AB_PAUSE, AB_LINK };
-
-struct AboutCtx {
-    HFONT font;
-    HFONT linkFont;   // 連結用的底線字型
-    bool paused;
-    std::wstring lastLog;
-};
-
-// 記錄區塊正在被使用者操作 (選取文字 / 捲動) 時不更新內容
-static bool AboutLogBusy(HWND ed) {
-    DWORD selStart = 0, selEnd = 0;
-    SendMessageW(ed, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
-    if (GetFocus() == ed && selStart != selEnd) return true;
-    SCROLLINFO si;
-    ZeroMemory(&si, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_POS;
-    if (GetScrollInfo(ed, SB_VERT, &si) && si.nPos != 0) return true;
-    ZeroMemory(&si, sizeof(si));
-    si.cbSize = sizeof(si);
-    si.fMask = SIF_POS;
-    if (GetScrollInfo(ed, SB_HORZ, &si) && si.nPos != 0) return true;
-    return false;
-}
-
-static void UpdateAboutLog(HWND dlg, AboutCtx* c) {
-    if (!c || c->paused) return;
-    HWND ed = GetDlgItem(dlg, AB_LOG);
-    if (AboutLogBusy(ed)) return;
-    std::wstring txt = BuildDebugText();
-    if (txt != c->lastLog) {
-        c->lastLog = txt;
-        SetWindowTextW(ed, txt.c_str());
-    }
-}
-
-static INT_PTR CALLBACK AboutDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
-    AboutCtx* c = (AboutCtx*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
-    switch (msg) {
-    case WM_INITDIALOG:
-        c = (AboutCtx*)lp;
-        SetWindowLongPtrW(dlg, GWLP_USERDATA, (LONG_PTR)c);
-        g_aboutDlg = dlg;
-        c->font = CreateFontW(-MulDiv(9, OverlayDpi(), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-        if (c->font) SendDlgItemMessageW(dlg, AB_LOG, WM_SETFONT, (WPARAM)c->font, TRUE);
-        {
-            HFONT base = (HFONT)SendMessageW(dlg, WM_GETFONT, 0, 0);
-            LOGFONTW lf;
-            if (base && GetObjectW(base, sizeof(lf), &lf)) {
-                lf.lfUnderline = TRUE;
-                c->linkFont = CreateFontIndirectW(&lf);
-                if (c->linkFont) SendDlgItemMessageW(dlg, AB_LINK, WM_SETFONT, (WPARAM)c->linkFont, TRUE);
-            }
-        }
-        SetTimer(dlg, 1, 1000, NULL);   // 診斷記錄每秒更新一次
-        UpdateAboutLog(dlg, c);
-        SetFocus(GetDlgItem(dlg, IDCANCEL));   // 不讓記錄區塊一開啟就取得焦點 (會全選文字而暫停更新)
-        return FALSE;
-    case WM_TIMER:
-        UpdateAboutLog(dlg, c);
-        return TRUE;
-    case WM_CTLCOLORSTATIC:   // 連結：藍色文字
-        if ((HWND)lp == GetDlgItem(dlg, AB_LINK)) {
-            HDC dc = (HDC)wp;
-            SetTextColor(dc, RGB(0, 102, 204));
-            SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
-            return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
-        }
-        break;
-    case WM_SETCURSOR:   // 連結：滑鼠變成手形
-        if ((HWND)wp == GetDlgItem(dlg, AB_LINK)) {
-            SetCursor(LoadCursorW(NULL, MAKEINTRESOURCEW(32649)));   // IDC_HAND
-            SetWindowLongPtrW(dlg, DWLP_MSGRESULT, TRUE);
-            return TRUE;
-        }
-        break;
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        if (id == AB_LINK && HIWORD(wp) == 0) {
-            OpenUrl(APP_URL_WSTR);
-            return TRUE;
-        }
-        if (id == AB_COPY) {
-            CopyTextToClipboard(dlg, BuildDebugText());   // 立即複製目前的記錄
-            return TRUE;
-        }
-        if (id == AB_PAUSE && c) {
-            c->paused = !c->paused;
-            SetDlgItemTextW(dlg, AB_PAUSE, T(c->paused ? S_DLG_AUTO_UPDATE : S_DLG_STOP_UPDATE));
-            if (!c->paused) UpdateAboutLog(dlg, c);
-            return TRUE;
-        }
-        if (id == IDCANCEL || id == IDOK) {
-            EndDialog(dlg, id);
-            return TRUE;
-        }
-        break;
-    }
-    case WM_DESTROY:
-        KillTimer(dlg, 1);
-        if (c && c->font) {
-            DeleteObject(c->font);
-            c->font = NULL;
-        }
-        if (c && c->linkFont) {
-            DeleteObject(c->linkFont);
-            c->linkFont = NULL;
-        }
-        g_aboutDlg = NULL;
-        break;
-    }
-    return FALSE;
-}
-
-static void ShowAboutDialog() {
-    if (g_aboutDlg) {
-        SetForegroundWindow(g_aboutDlg);
-        return;
-    }
-    if (g_monDlgOpen) {
-        if (g_monDlgHwnd) SetForegroundWindow(g_monDlgHwnd);
-        return;
-    }
-    const WORD BTN = 0x0080, EDT = 0x0081, STC = 0x0082, NOID = 0xFFFF;
-    std::vector<WORD> t;
-    DWORD style = DS_MODALFRAME | DS_SETFONT | DS_CENTER | DS_SETFOREGROUND | WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    t.push_back((WORD)(style & 0xFFFF));
-    t.push_back((WORD)(style >> 16));
-    t.push_back(0);
-    t.push_back(0);                 // 擴充樣式：無
-    size_t cditPos = t.size();
-    t.push_back(0);                 // 控制項數量 (稍後填入)
-    t.push_back(0);
-    t.push_back(0);                 // x, y
-    t.push_back(330);
-    t.push_back(308);               // cx, cy (對話框單位)
-    t.push_back(0);
-    t.push_back(0);
-    TmplStr(t, T(S_ABOUT_TITLE));
-    t.push_back(9);
-    TmplStr(t, L"Segoe UI");
-    int n = 0;
-    auto add = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) {
-        TmplItem(t, WS_CHILD | WS_VISIBLE | st, (short)x, (short)y, (short)cx, (short)cy, id, cls, text);
-        ++n;
-    };
-    std::wstring verText = L"Mabinogi Client Manager  v" APP_VERSION_WSTR;
-    const DWORD LOGEDIT = ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL | WS_VSCROLL | WS_HSCROLL | WS_BORDER | WS_TABSTOP;
-    add(BS_GROUPBOX, 8, 6, 314, 120, NOID, BTN, T(S_ABOUT_GROUP));
-    add(SS_LEFT, 14, 18, 302, 10, NOID, STC, verText.c_str());
-    add(SS_LEFT | SS_NOTIFY, 14, 29, 175, 10, AB_LINK, STC, APP_URL_WSTR);   // 版本號下一行：GitHub 連結 (點了開啟網址)
-    add(SS_LEFT, 14, 44, 302, 78, NOID, STC, T(S_ABOUT_TEXT));
-    add(BS_GROUPBOX, 8, 130, 314, 148, NOID, BTN, T(S_MON_DEBUG));
-    add(LOGEDIT, 14, 142, 302, 112, AB_LOG, EDT, L"");
-    add(BS_PUSHBUTTON | WS_TABSTOP, 14, 258, 50, 14, AB_COPY, BTN, T(S_DLG_COPY));
-    add(BS_PUSHBUTTON | WS_TABSTOP, 68, 258, 64, 14, AB_PAUSE, BTN, T(S_DLG_STOP_UPDATE));
-    add(BS_DEFPUSHBUTTON | WS_TABSTOP, 274, 286, 48, 14, IDCANCEL, BTN, T(S_DLG_CLOSE));
-    t[cditPos] = (WORD)n;
-
-    AboutCtx ctx;
-    ctx.font = NULL;
-    ctx.linkFont = NULL;
-    ctx.paused = false;
-    g_ovDebug = true;   // 診斷記錄只在關於視窗開啟期間收集
-    ClearDebugText();
-    if (g_monWake) SetEvent(g_monWake);
-    DialogBoxIndirectParamW(g_hInst, (LPCDLGTEMPLATEW)t.data(), g_hWnd, AboutDlgProc, (LPARAM)&ctx);
-    g_ovDebug = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -5143,20 +5744,19 @@ static void ShowMenu(HWND hwnd) {
 
     HMENU dbl = CreatePopupMenu();
     int da = g_dblAction;
-    AppendMenuW(dbl, MF_STRING | (da == 0 ? MF_CHECKED : 0), ID_DBL_BASE + 0, T(S_M_TOGGLE));
-    AppendMenuW(dbl, MF_STRING | (da == 1 ? MF_CHECKED : 0), ID_DBL_BASE + 1, T(S_DBL_CPU));
-    AppendMenuW(dbl, MF_STRING | (da == 2 ? MF_CHECKED : 0), ID_DBL_BASE + 2, T(S_DBL_MON));
+    AppendMenuW(dbl, MF_STRING | (da == 0 ? MF_CHECKED : 0), ID_DBL_BASE + 0, T(S_DBL_SETTINGS));
+    AppendMenuW(dbl, MF_STRING | (da == 1 ? MF_CHECKED : 0), ID_DBL_BASE + 1, T(S_M_TOGGLE));
+    AppendMenuW(dbl, MF_STRING | (da == 2 ? MF_CHECKED : 0), ID_DBL_BASE + 2, T(S_DBL_CPU));
+    AppendMenuW(dbl, MF_STRING | (da == 3 ? MF_CHECKED : 0), ID_DBL_BASE + 3, T(S_DBL_MON));
+    AppendMenuW(dbl, MF_STRING | (da == 4 ? MF_CHECKED : 0), ID_DBL_BASE + 4, T(S_DBL_TASKBAR));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)dbl, T(S_M_DBLCLICK));
 
     HMENU lang = CreatePopupMenu();
     int sel = g_langSetting;
     AppendMenuW(lang, MF_STRING | (sel == UL_AUTO ? MF_CHECKED : 0), ID_LANG_BASE + UL_AUTO, T(S_L_AUTO));
-    AppendMenuW(lang, MF_STRING | (sel == UL_ZHTW ? MF_CHECKED : 0), ID_LANG_BASE + UL_ZHTW, L"繁體中文 Chinese Traditional");
-    AppendMenuW(lang, MF_STRING | (sel == UL_ZHCN ? MF_CHECKED : 0), ID_LANG_BASE + UL_ZHCN, L"简体中文 Chinese Simplified");
-    AppendMenuW(lang, MF_STRING | (sel == UL_EN ? MF_CHECKED : 0), ID_LANG_BASE + UL_EN, L"英文 English");
-    AppendMenuW(lang, MF_STRING | (sel == UL_JA ? MF_CHECKED : 0), ID_LANG_BASE + UL_JA, L"日本語 Japanese");
+    for (int l = UL_ZHTW; l <= UL_KO; ++l) AppendMenuW(lang, MF_STRING | (sel == l ? MF_CHECKED : 0), ID_LANG_BASE + l, LangLabel(l));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)lang, T(S_M_LANG));
-    AppendMenuW(m, MF_STRING, ID_ABOUT, T(S_M_ABOUT));
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, T(S_M_SETTINGS));
     AppendMenuW(m, MF_STRING, ID_EXIT, T(S_M_EXIT));
 
     SetForegroundWindow(hwnd);
@@ -5215,8 +5815,8 @@ static void HandleCommand(int id) {
         SaveInt(L"MouseClip", g_mouseClip ? 1 : 0);
         UpdateMouseClip();
         break;
-    case ID_ABOUT:
-        ShowAboutDialog();
+    case ID_SETTINGS:
+        ShowSettingsDialog();
         break;
     case ID_EXIT:
         DestroyWindow(g_hWnd);
@@ -5242,12 +5842,12 @@ static void HandleCommand(int id) {
             unsigned long long nm = (cur ^ (1ULL << (id - ID_AFFCORE_BASE))) & (unsigned long long)g_maskAll;
             if (nm == 0) Notify(T(S_NEED_ONE_CORE));
             else SetAffMask(nm);
-        } else if (id >= ID_DBL_BASE && id <= ID_DBL_BASE + 2) {
+        } else if (id >= ID_DBL_BASE && id <= ID_DBL_BASE + 4) {
             g_dblAction = id - ID_DBL_BASE;
             SaveInt(L"DoubleClick", g_dblAction);
         } else if (id >= ID_OV_ENABLE && id <= ID_OV_LAST) {
             HandleOverlayCommand(id);
-        } else if (id >= ID_LANG_BASE && id <= ID_LANG_BASE + 4) {
+        } else if (id >= ID_LANG_BASE && id <= ID_LANG_BASE + kLangCount) {
             g_langSetting = id - ID_LANG_BASE;
             ApplyLanguage();
             SaveString(L"Language", LangName(g_langSetting));
@@ -5281,6 +5881,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ModeCheck();
         } else if (wp == 7) {
             UpdateMouseClip();
+        } else if (wp == 8) {
+            HideToast();   // 圖示上方的提示顯示時間到
         } else if (wp == 2) {
             if (CursorOnTrayIcon()) ApplyTrayState();   // 仍停留在圖示上：更新提示
             else KillTimer(hwnd, 2);                    // 已離開：停止更新
@@ -5465,6 +6067,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     ReleaseMouseClip();                              // 結束本工具前先放掉滑鼠範圍限制
     if (g_menuTip) DestroyWindow(g_menuTip);
+    if (g_toastTip) DestroyWindow(g_toastTip);
     if (g_hideTaskbar) ApplyTaskbarButtons(false);   // 結束本工具前先恢復遊戲的工作列按鈕 (設定仍保留，下次啟動會再套用)
     ReleaseTaskbarList();
     CoUninitialize();
