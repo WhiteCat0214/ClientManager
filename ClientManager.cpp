@@ -32,9 +32,18 @@
 #include <tcpestats.h>
 #include <commctrl.h>
 #include <shobjidl.h>
+#include <objidl.h>
+#include <commdlg.h>
+#include <cmath>
+#include <algorithm>
+using std::min;   // gdiplus.h 內部使用不含 std:: 的 min / max (這裡定義了 NOMINMAX)
+using std::max;
+#include <gdiplus.h>
 #include "version.h"
 
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -72,7 +81,12 @@ enum {
     ID_LANG_BASE = 1400,       // + 語言 0..5 (自動 / 繁中 / 簡中 / 英文 / 日文 / 韓文)
     ID_OV_ENABLE = 1500,       // 效能監控：啟用 / 鎖定位置
     ID_OV_LOCK,
-    ID_OV_LAST = 1599
+    ID_OV_LAST = 1599,
+    ID_IMG_MASTER = 1600,      // 圖片置頂：總開關 / 全域鎖定 / 設定 / 各組啟用
+    ID_IMG_LOCKALL,
+    ID_IMG_SETTINGS,
+    ID_IMG_GROUP_BASE = 1610,  // + 組別 0..9
+    ID_IMG_LAST = 1699
 };
 
 static const int kRatios[] = { 30, 50, 70, 80, 90, 95, 98 };
@@ -171,6 +185,11 @@ static bool g_monDlgOpen = false;                   // 設定視窗是否開啟�
 static bool g_monPreview = false;                   // 設定視窗正顯示「效能監控」頁 (固定顯示監控畫面做預覽)
 static HWND g_monDlgHwnd = NULL;
 static void UpdateOverlayVisibility();
+static void ImgUpdateVisibility();
+static void ImgLoadSettings();
+static void ImgSaveMissing();
+static bool g_imgMaster = false;       // 圖片置頂總開關 (不改變各組的啟用設定)
+static bool g_imgLockAll = false;      // 圖片置頂全域鎖定
 static std::atomic<bool> g_ovLatency(true);         // 顯示網路延遲
 static std::atomic<int> g_ovCpuMethod(0);           // CPU 使用率算法：0 = PDH 效能計數器 (預設)，1 = CPU 週期數，2 = 行程 CPU 時間
 static std::atomic<int> g_ovLatMethod(0);           // Latency 取樣方式：0 = 最近一次樣本值 (預設)，1 = 平滑往返時間
@@ -403,6 +422,41 @@ enum StrId {
     S_CLIP_BL,
     S_PRIO_UNSET,
     S_M_EXIT,
+    S_M_IMG,
+    S_IMG_MASTER,
+    S_IMG_GROUP,
+    S_IMG_LOCKALL,
+    S_IMG_SETTINGS,
+    S_IMG_GROUPBOX,
+    S_IMG_SEL,
+    S_IMG_GROUPN,
+    S_IMG_ENABLE,
+    S_IMG_LOCK,
+    S_IMG_NAME,
+    S_IMG_SRC,
+    S_IMG_SRC_W,
+    S_IMG_SRC_B,
+    S_IMG_SRC_C,
+    S_IMG_SRC_F,
+    S_IMG_PATH,
+    S_IMG_BROWSE,
+    S_IMG_OPACITY,
+    S_IMG_SCALE,
+    S_IMG_W,
+    S_IMG_H,
+    S_IMG_FLIP,
+    S_IMG_ROT,
+    S_IMG_Z,
+    S_IMG_FGONLY,
+    S_IMG_GIFPAUSE,
+    S_IMG_GIFSPEED,
+    S_IMG_RESETSIZE,
+    S_IMG_NOTE,
+    S_IMG_MISSING,
+    S_IMG_MISSING2,
+    S_IMG_NOTSET,
+    S_IMG_LOADFAIL,
+    S_IMG_FILTER,
     S__COUNT
 };
 
@@ -549,6 +603,41 @@ static const wchar_t* const kStr[S__COUNT][5] = {
     { L"也套用於「無邊框全視窗模式」", L"也应用于「无边框全窗口模式」", L"Also apply in borderless full-window mode", L"「ボーダーレス全画面ウィンドウモード」にも適用", L"'테두리 없는 전체 창 모드'에도 적용" },   // CLIP_BL
     { L"(尚未設定)", L"(尚未设置)", L"(not set)", L"(未設定)", L"(설정 안 됨)" },   // PRIO_UNSET
     { L"結束程式", L"退出程序", L"Exit", L"終了", L"종료" },   // M_EXIT
+    { L"圖片置頂", L"图片置顶", L"Pinned images", L"画像の最前面表示", L"이미지 항상 위에" },   // M_IMG
+    { L"啟用圖片置頂 (全域啟用)", L"启用图片置顶 (全局启用)", L"Enable pinned images (global)", L"画像の最前面表示を有効にする (全体)", L"이미지 항상 위에 사용 (전체)" },   // IMG_MASTER
+    { L"啟用第%d組", L"启用第%d组", L"Enable group %d", L"グループ %d を有効にする", L"그룹 %d 사용" },   // IMG_GROUP
+    { L"鎖定全部圖片 (全域鎖定)", L"锁定全部图片 (全局锁定)", L"Lock all images (global lock)", L"すべての画像を固定 (全体固定)", L"모든 이미지 고정 (전체 고정)" },   // IMG_LOCKALL
+    { L"圖片置頂設定...", L"图片置顶设置...", L"Pinned image settings...", L"画像の最前面表示の設定...", L"이미지 항상 위에 설정..." },   // IMG_SETTINGS
+    { L"圖片組設定", L"图片组设置", L"Image group settings", L"画像グループの設定", L"이미지 그룹 설정" },   // IMG_GROUPBOX
+    { L"選擇組別", L"选择组别", L"Group", L"グループ選択", L"그룹 선택" },   // IMG_SEL
+    { L"第 %d 組", L"第 %d 组", L"Group %d", L"グループ %d", L"그룹 %d" },   // IMG_GROUPN
+    { L"啟用此組", L"启用此组", L"Enable", L"有効", L"사용" },   // IMG_ENABLE
+    { L"鎖定此組", L"锁定此组", L"Lock", L"固定", L"고정" },   // IMG_LOCK
+    { L"名稱", L"名称", L"Name", L"名前", L"이름" },   // IMG_NAME
+    { L"圖片來源", L"图片来源", L"Source", L"画像の種類", L"이미지 소스" },   // IMG_SRC
+    { L"內建料理尺 (白色)", L"内置料理尺 (白色)", L"Built-in cooking ruler (white)", L"内蔵の料理定規 (白)", L"내장 요리 자 (흰색)" },   // IMG_SRC_W
+    { L"內建料理尺 (黑色)", L"内置料理尺 (黑色)", L"Built-in cooking ruler (black)", L"内蔵の料理定規 (黒)", L"내장 요리 자 (검정)" },   // IMG_SRC_B
+    { L"內建料理尺 (自訂顏色)", L"内置料理尺 (自定义颜色)", L"Built-in cooking ruler (custom color)", L"内蔵の料理定規 (カスタム色)", L"내장 요리 자 (사용자 색상)" },   // IMG_SRC_C
+    { L"自選圖片 (jpg / png / gif)", L"自选图片 (jpg / png / gif)", L"Custom image (jpg / png / gif)", L"画像ファイル (jpg / png / gif)", L"사용자 이미지 (jpg / png / gif)" },   // IMG_SRC_F
+    { L"路徑", L"路径", L"Path", L"パス", L"경로" },   // IMG_PATH
+    { L"瀏覽...", L"浏览...", L"Browse...", L"参照...", L"찾아보기..." },   // IMG_BROWSE
+    { L"不透明度 (%)", L"不透明度 (%)", L"Opacity (%)", L"不透明度 (%)", L"불투명도 (%)" },   // IMG_OPACITY
+    { L"縮放比例 (%)", L"缩放比例 (%)", L"Scale (%)", L"拡大率 (%)", L"배율 (%)" },   // IMG_SCALE
+    { L"寬", L"宽", L"W", L"幅", L"너비" },   // IMG_W
+    { L"高", L"高", L"H", L"高さ", L"높이" },   // IMG_H
+    { L"水平翻轉", L"水平翻转", L"Flip horizontally", L"左右反転", L"좌우 반전" },   // IMG_FLIP
+    { L"旋轉", L"旋转", L"Rotate", L"回転", L"회전" },   // IMG_ROT
+    { L"層級 (數字越大越上層)", L"层级 (数字越大越靠上)", L"Layer (higher = on top)", L"重なり順 (大きいほど上)", L"레이어 (클수록 위)" },   // IMG_Z
+    { L"僅在遊戲視窗為前景時顯示", L"仅在游戏窗口为前台时显示", L"Show only when the game window is in the foreground", L"ゲームウィンドウが前面のときのみ表示", L"게임 창이 전면일 때만 표시" },   // IMG_FGONLY
+    { L"暫停 GIF 動畫", L"暂停 GIF 动画", L"Pause GIF animation", L"GIF アニメを一時停止", L"GIF 애니메이션 일시 정지" },   // IMG_GIFPAUSE
+    { L"GIF 播放速度", L"GIF 播放速度", L"GIF speed", L"GIF の再生速度", L"GIF 재생 속도" },   // IMG_GIFSPEED
+    { L"重置為原始大小", L"重置为原始大小", L"Reset to original size", L"元のサイズに戻す", L"원래 크기로 초기화" },   // IMG_RESETSIZE
+    { L"未鎖定時：拖曳圖片可移動，拖曳四角的控制點可等比例縮放，點一下圖片後可用方向鍵微調 1 像素 (按住 Shift 為 10 像素)。位置以所在螢幕的左上角起算。\n此頁的變更會立即生效並儲存，不需按「確定」。", L"未锁定时：拖动图片可移动，拖动四角的控制点可等比例缩放，点一下图片后可用方向键微调 1 像素 (按住 Shift 为 10 像素)。位置以所在屏幕的左上角起算。\n此页的更改会立即生效并保存，无需点击「确定」。", L"While unlocked: drag the image to move it, drag a corner handle to resize it proportionally, and click the image then use the arrow keys to nudge it 1 px (Shift = 10 px). Positions are measured from the top-left of the screen the image is on.\nChanges on this page apply and are saved immediately; OK is not needed.", L"固定していないとき：画像をドラッグして移動、四隅のハンドルをドラッグして縦横比を保ったまま拡大縮小、画像をクリックしてから矢印キーで 1 ピクセル単位で微調整できます (Shift で 10 ピクセル)。位置は画像があるモニターの左上が基準です。\nこのページの変更は即時に反映・保存され、「OK」は不要です。", L"고정하지 않았을 때: 이미지를 끌어 이동하고, 모서리 핸들을 끌어 비율을 유지한 채 크기를 조절하며, 이미지를 클릭한 뒤 방향키로 1픽셀씩 미세 조정할 수 있습니다 (Shift = 10픽셀). 위치는 이미지가 있는 모니터의 왼쪽 위 기준입니다.\n이 페이지의 변경 사항은 즉시 적용·저장되며 '확인'이 필요 없습니다." },   // IMG_NOTE
+    { L"圖片遺失：%s", L"图片丢失：%s", L"Image missing: %s", L"画像が見つかりません：%s", L"이미지를 찾을 수 없음: %s" },   // IMG_MISSING
+    { L"請在設定中重新指定圖片", L"请在设置中重新指定图片", L"Please choose the image again in Settings", L"設定で画像を指定し直してください", L"설정에서 이미지를 다시 지정하세요" },   // IMG_MISSING2
+    { L"尚未選擇圖片", L"尚未选择图片", L"No image selected", L"画像が未選択です", L"이미지가 선택되지 않음" },   // IMG_NOTSET
+    { L"第 %d 組的圖片無法載入：\n%s\n請到「設定」的「圖片置頂」頁重新指定圖片。", L"第 %d 组的图片无法加载：\n%s\n请到「设置」的「图片置顶」页重新指定图片。", L"The image of group %d could not be loaded:\n%s\nPlease choose it again on the Pinned images page in Settings.", L"グループ %d の画像を読み込めませんでした：\n%s\n「設定」の「画像の最前面表示」ページで指定し直してください。", L"그룹 %d의 이미지를 불러올 수 없습니다:\n%s\n'설정'의 '이미지 항상 위에' 페이지에서 다시 지정하세요." },   // IMG_LOADFAIL
+    { L"圖片檔 (jpg / png / gif)", L"图片文件 (jpg / png / gif)", L"Image files (jpg / png / gif)", L"画像ファイル (jpg / png / gif)", L"이미지 파일 (jpg / png / gif)" },   // IMG_FILTER
 };
 
 static inline const wchar_t* T(int id) { return kStr[id][g_lang - 1]; }
@@ -927,6 +1016,9 @@ static void SaveAllSettings() {
     SaveString(L"ClientPath", GetCachedPath());
     SaveString(L"ClientArgs", GetCachedArgs());
     SaveOverlaySettings();
+    SaveInt(L"ImgMaster", g_imgMaster ? 1 : 0);
+    SaveInt(L"ImgLockAll", g_imgLockAll ? 1 : 0);
+    ImgSaveMissing();
 }
 
 // ini 的 MouseClipMargin：預設 15，範圍 0 ~ 200。每次啟動與每次從選單開啟「限制滑鼠移動範圍」時重新讀取
@@ -975,6 +1067,7 @@ static void LoadSettings() {
     GetPrivateProfileStringW(L"Settings", L"Language", L"auto", buf.data(), 32, g_iniPath.c_str());
     g_langSetting = LangFromName(buf.data());
     LoadOverlaySettings();
+    ImgLoadSettings();
     buf[0] = 0;
     GetPrivateProfileStringW(L"Settings", L"ClientArgs", L"", buf.data(), (DWORD)buf.size(), g_iniPath.c_str());
     {
@@ -3870,6 +3963,7 @@ static bool OverlayCovered() {
 //   * 「只在遊戲前景時顯示」：前景不是遊戲就隱藏；但前景是本工具 (選單) 或工作列 / 縮圖預覽時維持原狀，避免閃爍
 //   * 顯示期間每 40 毫秒檢查一次有沒有被工作列等視窗蓋住，被蓋住才立刻重新置頂
 static void UpdateOverlayVisibility() {
+    ImgUpdateVisibility();   // 圖片置頂也依前景視窗 / 遊戲狀態更新 (同樣的時機)
     if (!g_ovHwnd) return;
     bool want = false;
     DWORD gp = g_gamePid;
@@ -3974,6 +4068,1063 @@ static void StopMonitor() {
     if (g_monThread.joinable()) g_monThread.join();
 }
 
+// ===========================================================================
+//  圖片置頂 (料理尺)：最多 10 組，每組一個獨立的分層視窗 (WS_EX_LAYERED，每個像素獨立 Alpha)
+//  * 圖片以 GDI+ 解碼：靜態圖片轉成 32bpp 預乘 Alpha 位圖後就釋放檔案串流；GIF 保留串流，每個影格播放時才解碼
+//  * 選擇檔案後不複製，只記錄原始路徑；檔案遺失時顯示占位框
+//  * 未鎖定：半透明深色背景 + 四角縮放控制點，可拖曳 / 縮放 / 方向鍵微調；鎖定：沒有背景與控制點，整個視窗滑鼠穿透
+//  * 只有「啟用 + 總開關開啟」的組別才會建立視窗並載入圖片；其餘不佔用記憶體與 CPU
+//  * 只在 UI 執行緒使用
+// ===========================================================================
+static const int kImgGroups = 10;
+static const int kImgPad = 10;                         // 未鎖定時，圖片四周留給縮放控制點的邊 (像素)
+static const int kImgMinShort = 4;                     // 縮放後短邊的最小像素數
+static const int kImgMinLong = 24;                     // 縮放後長邊的最小像素數
+static const int kImgMaxSide = 7680;                   // 縮放後單邊的最大像素數
+static const long long kImgMaxPixels = 16LL * 1024 * 1024;   // 縮放後的最大像素數 (限制記憶體用量)
+static const int kImgPlaceholderW = 260, kImgPlaceholderH = 44;   // 圖片遺失 / 未選擇時的占位框大小
+static const int kRulerW = 300, kRulerH = 9;           // 內建料理尺：目前遊戲版本的實際像素大小
+static const char* const kRulerHex[9] = {
+    "8000000200000008000000200000008000000200000008000000200000008000000200000010",
+    "8000000200000008000000200000008000000200000008000000200000008000000200000010",
+    "8000000200000008000000200000008000000200000008000000200000008000000200000010",
+    "8000000200000008000000200000008000000200000008000000200000008000000200000010",
+    "80010012000400E8001003A00040028001003A000400E8001003A000400E8001003A000404F0",
+    "8001003200040028001000A00040068001002200040088001002A000400A8001002A00040CB0",
+    "80010012000400E8001003A000400A8001003A000400E8001000A000400E8001003A000404B0",
+    "8001001200040088001000A000400E8001000A000400A8001000A000400A8001000A000404B0",
+    "8001003A000400E8001003A00040028001003A000400E8001000A000400E8001003A00040EF0"
+};
+
+struct ImgGroup {
+    // ---- 設定 (存入 ClientManager.ini 的 [ImageN]) ----
+    bool enabled, locked, fgOnly, flipH, gifPaused;
+    int source;        // 0 = 內建料理尺 (白)，1 = 內建料理尺 (黑)，2 = 內建料理尺 (自訂顏色)，3 = 自選圖片
+    unsigned int rulerColor;   // source = 2 時的顏色 (0xRRGGBB)
+    int opacity;       // 5 ~ 100 (%)
+    int scale;         // 縮放比例 (%)，相對於旋轉後的原始大小
+    int rot;           // 0 / 90 / 180 / 270 (順時針)
+    int gifSpeed;      // GIF 播放速度 (%)
+    int z;             // 層級：0 = 最底層 ... 9 = 最上層 (10 組各佔一個，不重複)
+    int x, y;          // 圖片左上角，相對於所在螢幕左上角 (像素)
+    std::wstring name, path, monitor;
+    // ---- 執行階段 ----
+    HWND hwnd;
+    Gdiplus::Bitmap* bmp;
+    IStream* stream;
+    int srcW, srcH, frames, frame;
+    std::vector<int> delays;   // 每個影格的顯示時間 (毫秒)
+    bool missing, loaded, shown;
+    std::wstring loadedSig;
+    HDC dc;
+    HBITMAP dib;
+    HGDIOBJ oldBmp;
+    void* bits;
+    int dibW, dibH;
+    ImgGroup() : enabled(false), locked(false), fgOnly(false), flipH(false), gifPaused(false),
+                 source(0), rulerColor(0xFFFFFFu), opacity(100), scale(100), rot(0), gifSpeed(100), z(0), x(100), y(100),
+                 hwnd(NULL), bmp(NULL), stream(NULL), srcW(0), srcH(0), frames(1), frame(0),
+                 missing(false), loaded(false), shown(false), dc(NULL), dib(NULL), oldBmp(NULL), bits(NULL), dibW(0), dibH(0) {}
+};
+
+static ImgGroup g_img[kImgGroups];
+static ULONG_PTR g_gdipToken = 0;
+static bool g_gdipOn = false;
+static bool g_imgClassReg = false;
+
+static void ImgNotifyDlg(int idx);   // 通知設定視窗：圖片被拖曳 / 縮放 / 微調後更新欄位 (idx = -1 代表全部重新載入)
+
+static std::wstring ImgSec(int i) {
+    wchar_t b[16];
+    wsprintfW(b, L"Image%d", i + 1);
+    return b;
+}
+
+static void SaveStringS(const std::wstring& sec, const wchar_t* key, const std::wstring& v) {
+    EnsureUnicodeIni();
+    WritePrivateProfileStringW(sec.c_str(), key, v.c_str(), g_iniPath.c_str());
+}
+
+static void SaveIntS(const std::wstring& sec, const wchar_t* key, int v) {
+    wchar_t b[16];
+    wsprintfW(b, L"%d", v);
+    SaveStringS(sec, key, b);
+}
+
+static bool IniHasS(const std::wstring& sec, const wchar_t* key) {
+    wchar_t b[8];
+    b[0] = 0;
+    GetPrivateProfileStringW(sec.c_str(), key, L"", b, 8, g_iniPath.c_str());
+    return b[0] != 0;
+}
+
+static int IniIntS(const std::wstring& sec, const wchar_t* key, int def, int lo, int hi) {
+    wchar_t b[32];
+    b[0] = 0;
+    GetPrivateProfileStringW(sec.c_str(), key, L"", b, 32, g_iniPath.c_str());
+    if (!b[0]) return def;
+    int v = _wtoi(b);
+    return std::max(lo, std::min(hi, v));
+}
+
+static std::wstring IniStrS(const std::wstring& sec, const wchar_t* key, DWORD maxLen) {
+    std::vector<wchar_t> b(maxLen + 1);
+    b[0] = 0;
+    GetPrivateProfileStringW(sec.c_str(), key, L"", b.data(), maxLen, g_iniPath.c_str());
+    return b.data();
+}
+
+// 層級由低到高的組別編號
+static void ImgZOrder(int* order) {
+    for (int k = 0; k < kImgGroups; ++k) order[k] = k;
+    std::sort(order, order + kImgGroups, [](int a, int b) {
+        if (g_img[a].z != g_img[b].z) return g_img[a].z < g_img[b].z;
+        return a < b;
+    });
+}
+
+// 6 位數 16 進位顏色 (RRGGBB，可以有前面的 #)；格式不對時回傳 def
+static unsigned int ParseHexColor(const std::wstring& in, unsigned int def, bool* ok = NULL) {
+    std::wstring t = in;
+    while (!t.empty() && (t.front() == L' ' || t.front() == L'#')) t.erase(t.begin());
+    while (!t.empty() && t.back() == L' ') t.pop_back();
+    bool good = (t.size() == 6);
+    unsigned int v = 0;
+    for (size_t k = 0; good && k < 6; ++k) {
+        wchar_t ch = t[k];
+        int d = (ch >= L'0' && ch <= L'9') ? ch - L'0' : (ch >= L'A' && ch <= L'F') ? ch - L'A' + 10 : (ch >= L'a' && ch <= L'f') ? ch - L'a' + 10 : -1;
+        if (d < 0) good = false;
+        else v = v * 16 + (unsigned int)d;
+    }
+    if (ok) *ok = good;
+    return good ? v : def;
+}
+
+static std::wstring HexColorText(unsigned int rgb) {
+    wchar_t b[16];
+    wsprintfW(b, L"%06X", rgb & 0xFFFFFFu);
+    return b;
+}
+
+static void ImgSetDefaults(int i) {
+    ImgGroup& g = g_img[i];
+    g.enabled = false;
+    g.locked = false;
+    g.fgOnly = false;
+    g.flipH = false;
+    g.gifPaused = false;
+    g.source = (i == 1) ? 1 : 0;   // 第 2 組預設用黑色料理尺
+    g.rulerColor = 0xFFFFFFu;
+    g.opacity = 100;
+    g.scale = 100;
+    g.rot = 0;
+    g.gifSpeed = 100;
+    g.z = i;
+    g.x = 100;
+    g.y = 100 + i * 30;
+    g.name.clear();
+    g.path.clear();
+    g.monitor.clear();
+}
+
+static void ImgLoadSettings() {
+    g_imgMaster = IniBool(L"ImgMaster", 0);
+    g_imgLockAll = IniBool(L"ImgLockAll", 0);
+    for (int i = 0; i < kImgGroups; ++i) {
+        ImgSetDefaults(i);
+        ImgGroup& g = g_img[i];
+        std::wstring s = ImgSec(i);
+        g.enabled = IniIntS(s, L"Enabled", 0, 0, 1) != 0;
+        g.locked = IniIntS(s, L"Locked", 0, 0, 1) != 0;
+        g.fgOnly = IniIntS(s, L"FgOnly", 0, 0, 1) != 0;
+        g.name = IniStrS(s, L"Name", 40);
+        g.source = IniIntS(s, L"Source", g.source, 0, 3);
+        g.rulerColor = ParseHexColor(IniStrS(s, L"RulerColor", 16), 0xFFFFFFu);
+        g.path = IniStrS(s, L"Path", 1000);
+        g.opacity = IniIntS(s, L"Opacity", 100, 5, 100);
+        g.scale = IniIntS(s, L"Scale", 100, 1, 10000);   // 實際的範圍在載入圖片後，依圖片大小修正
+        g.monitor = IniStrS(s, L"Monitor", 60);
+        g.x = IniIntS(s, L"X", g.x, -100000, 100000);
+        g.y = IniIntS(s, L"Y", g.y, -100000, 100000);
+        g.flipH = IniIntS(s, L"FlipH", 0, 0, 1) != 0;
+        g.rot = ((IniIntS(s, L"Rotate", 0, 0, 359) + 45) / 90 % 4) * 90;
+        g.gifPaused = IniIntS(s, L"GifPaused", 0, 0, 1) != 0;
+        g.gifSpeed = IniIntS(s, L"GifSpeed", 100, 10, 1000);
+        g.z = IniIntS(s, L"Z", i, 0, kImgGroups - 1);
+    }
+    int order[kImgGroups];   // 層級必須是 0 ~ 9 的排列：重複或缺少時依目前順序重新編號
+    ImgZOrder(order);
+    for (int k = 0; k < kImgGroups; ++k) g_img[order[k]].z = k;
+}
+
+static void ImgSaveAll(int i) {
+    const ImgGroup& g = g_img[i];
+    std::wstring s = ImgSec(i);
+    SaveIntS(s, L"Enabled", g.enabled ? 1 : 0);
+    SaveIntS(s, L"Locked", g.locked ? 1 : 0);
+    SaveIntS(s, L"FgOnly", g.fgOnly ? 1 : 0);
+    SaveStringS(s, L"Name", g.name);
+    SaveIntS(s, L"Source", g.source);
+    SaveStringS(s, L"RulerColor", HexColorText(g.rulerColor));
+    SaveStringS(s, L"Path", g.path);
+    SaveIntS(s, L"Opacity", g.opacity);
+    SaveIntS(s, L"Scale", g.scale);
+    SaveStringS(s, L"Monitor", g.monitor);
+    SaveIntS(s, L"X", g.x);
+    SaveIntS(s, L"Y", g.y);
+    SaveIntS(s, L"FlipH", g.flipH ? 1 : 0);
+    SaveIntS(s, L"Rotate", g.rot);
+    SaveIntS(s, L"GifPaused", g.gifPaused ? 1 : 0);
+    SaveIntS(s, L"GifSpeed", g.gifSpeed);
+    SaveIntS(s, L"Z", g.z);
+}
+
+// 拖曳 / 縮放 / 方向鍵後只更新位置與大小
+static void ImgSaveGeom(int i) {
+    const ImgGroup& g = g_img[i];
+    std::wstring s = ImgSec(i);
+    SaveStringS(s, L"Monitor", g.monitor);
+    SaveIntS(s, L"X", g.x);
+    SaveIntS(s, L"Y", g.y);
+    SaveIntS(s, L"Scale", g.scale);
+}
+
+// 設定檔裡還沒有的組別，補上完整的預設值 (已經有的不動，保留使用者加的註解)
+static void ImgSaveMissing() {
+    for (int i = 0; i < kImgGroups; ++i) {
+        if (!IniHasS(ImgSec(i), L"Enabled")) ImgSaveAll(i);
+    }
+}
+
+static bool ImgIsLocked(int i) { return g_imgLockAll || g_img[i].locked; }
+
+static bool ImgEnsureGdip() {
+    if (g_gdipOn) return true;
+    Gdiplus::GdiplusStartupInput in;
+    if (Gdiplus::GdiplusStartup(&g_gdipToken, &in, NULL) != Gdiplus::Ok) return false;
+    g_gdipOn = true;
+    return true;
+}
+
+// 內建料理尺：從遊戲截圖取出的刻度 (300 x 9 像素)，白色 / 黑色 / 自訂顏色，背景透明
+static Gdiplus::Bitmap* ImgMakeRuler(unsigned int rgb) {
+    Gdiplus::Bitmap* b = new Gdiplus::Bitmap(kRulerW, kRulerH, PixelFormat32bppPARGB);
+    if (b->GetLastStatus() != Gdiplus::Ok) {
+        delete b;
+        return NULL;
+    }
+    Gdiplus::BitmapData bd;
+    Gdiplus::Rect r(0, 0, kRulerW, kRulerH);
+    if (b->LockBits(&r, Gdiplus::ImageLockModeWrite, PixelFormat32bppPARGB, &bd) != Gdiplus::Ok) {
+        delete b;
+        return NULL;
+    }
+    const unsigned int col = 0xFF000000u | (rgb & 0xFFFFFFu);   // 不透明，預乘 Alpha 後的顏色不變
+    for (int y = 0; y < kRulerH; ++y) {
+        unsigned int* row = (unsigned int*)((BYTE*)bd.Scan0 + (ptrdiff_t)y * bd.Stride);
+        const char* hex = kRulerHex[y];
+        for (int x = 0; x < kRulerW; ++x) {
+            int bi = x >> 3;
+            int hi = hex[bi * 2], lo = hex[bi * 2 + 1];
+            int v = (hi <= '9' ? hi - '0' : hi - 'A' + 10) * 16 + (lo <= '9' ? lo - '0' : lo - 'A' + 10);
+            row[x] = ((v >> (7 - (x & 7))) & 1) ? col : 0u;
+        }
+    }
+    b->UnlockBits(&bd);
+    return b;
+}
+
+static std::wstring ImgSigOf(const ImgGroup& g) {
+    if (g.source == 3) return L"F|" + g.path;
+    if (g.source == 2) return L"B2|" + HexColorText(g.rulerColor);
+    return g.source == 1 ? L"B1" : L"B0";
+}
+
+static void ImgFreeImage(int i) {
+    ImgGroup& g = g_img[i];
+    if (g.bmp) {
+        delete g.bmp;
+        g.bmp = NULL;
+    }
+    if (g.stream) {
+        g.stream->Release();
+        g.stream = NULL;
+    }
+    g.srcW = g.srcH = 0;
+    g.frames = 1;
+    g.frame = 0;
+    g.delays.clear();
+    g.missing = false;
+    g.loaded = false;
+    g.loadedSig.clear();
+}
+
+static void ImgFreeDib(int i) {
+    ImgGroup& g = g_img[i];
+    if (g.dc && g.oldBmp) SelectObject(g.dc, g.oldBmp);
+    if (g.dib) DeleteObject(g.dib);
+    if (g.dc) DeleteDC(g.dc);
+    g.dib = NULL;
+    g.dc = NULL;
+    g.oldBmp = NULL;
+    g.bits = NULL;
+    g.dibW = g.dibH = 0;
+}
+
+// 讀取圖片檔：整個檔案讀進記憶體後解碼，不會鎖住原始檔案 (檔案可以隨時移動 / 刪除)
+static bool ImgLoadFile(int i, const std::wstring& path) {
+    ImgGroup& g = g_img[i];
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 256LL * 1024 * 1024) {
+        CloseHandle(h);
+        return false;
+    }
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)sz.QuadPart);
+    if (!hg) {
+        CloseHandle(h);
+        return false;
+    }
+    void* p = GlobalLock(hg);
+    DWORD rd = 0;
+    BOOL ok = p ? ReadFile(h, p, (DWORD)sz.QuadPart, &rd, NULL) : FALSE;
+    if (p) GlobalUnlock(hg);
+    CloseHandle(h);
+    if (!ok || rd != (DWORD)sz.QuadPart) {
+        GlobalFree(hg);
+        return false;
+    }
+    IStream* st = NULL;
+    if (CreateStreamOnHGlobal(hg, TRUE, &st) != S_OK || !st) {   // TRUE：串流釋放時一併釋放記憶體
+        GlobalFree(hg);
+        return false;
+    }
+    Gdiplus::Bitmap* b = Gdiplus::Bitmap::FromStream(st, FALSE);
+    if (!b || b->GetLastStatus() != Gdiplus::Ok) {
+        delete b;
+        st->Release();
+        return false;
+    }
+    UINT w = b->GetWidth(), hgt = b->GetHeight();
+    if (w == 0 || hgt == 0 || (unsigned long long)w * hgt > 50000000ULL) {   // 超過 5000 萬像素的圖片不載入 (記憶體用量)
+        delete b;
+        st->Release();
+        return false;
+    }
+    UINT frames = 1;
+    bool anim = false;
+    UINT dimCount = b->GetFrameDimensionsCount();
+    if (dimCount > 0) {
+        std::vector<GUID> ids(dimCount);
+        b->GetFrameDimensionsList(ids.data(), dimCount);
+        if (IsEqualGUID(ids[0], Gdiplus::FrameDimensionTime)) {
+            UINT n = b->GetFrameCount(&ids[0]);
+            if (n > 1) {
+                frames = n;
+                anim = true;
+            }
+        }
+    }
+    std::vector<int> delays;
+    if (anim) {
+        UINT psz = b->GetPropertyItemSize(PropertyTagFrameDelay);
+        if (psz > 0) {
+            std::vector<BYTE> buf(psz);
+            Gdiplus::PropertyItem* pi = (Gdiplus::PropertyItem*)buf.data();
+            if (b->GetPropertyItem(PropertyTagFrameDelay, psz, pi) == Gdiplus::Ok) {
+                const UINT* d = (const UINT*)pi->value;
+                UINT cnt = pi->length / (UINT)sizeof(UINT);
+                for (UINT k = 0; k < frames; ++k) delays.push_back((int)((k < cnt) ? d[k] : 10) * 10);   // 單位：1/100 秒
+            }
+        }
+        if (delays.empty()) delays.assign(frames, 100);
+    }
+    Gdiplus::Bitmap* useBmp = b;
+    IStream* useStream = st;
+    if (!anim) {   // 靜態圖片：轉成 32bpp 預乘 Alpha 位圖，之後不再需要原始檔案的資料
+        Gdiplus::Bitmap* pb = new Gdiplus::Bitmap((INT)w, (INT)hgt, PixelFormat32bppPARGB);
+        bool good = (pb->GetLastStatus() == Gdiplus::Ok);
+        if (good) {
+            Gdiplus::Graphics gg(pb);
+            gg.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+            good = (gg.DrawImage(b, Gdiplus::Rect(0, 0, (INT)w, (INT)hgt), 0, 0, (INT)w, (INT)hgt, Gdiplus::UnitPixel) == Gdiplus::Ok);
+        }
+        delete b;
+        st->Release();
+        if (!good) {
+            delete pb;
+            return false;
+        }
+        useBmp = pb;
+        useStream = NULL;
+    }
+    g.bmp = useBmp;
+    g.stream = useStream;
+    g.srcW = (int)w;
+    g.srcH = (int)hgt;
+    g.frames = (int)frames;
+    g.frame = 0;
+    g.delays = delays;
+    return true;
+}
+
+// 載入這一組的圖片。成功回傳 true；失敗 (檔案遺失 / 無法解碼 / 尚未選擇) 時 missing = true，顯示占位框
+static bool ImgLoad(int i) {
+    ImgGroup& g = g_img[i];
+    ImgFreeImage(i);
+    g.loaded = true;
+    g.loadedSig = ImgSigOf(g);
+    if (g.source != 3) {
+        Gdiplus::Bitmap* b = ImgMakeRuler(g.source == 1 ? 0x000000u : (g.source == 2 ? g.rulerColor : 0xFFFFFFu));
+        if (!b) {
+            g.missing = true;
+            return false;
+        }
+        g.bmp = b;
+        g.srcW = kRulerW;
+        g.srcH = kRulerH;
+        g.missing = false;
+        return true;
+    }
+    g.missing = true;
+    if (g.path.empty()) return false;
+    if (!ImgLoadFile(i, g.path)) return false;
+    g.missing = false;
+    return true;
+}
+
+static bool ImgIsPlaceholder(const ImgGroup& g) { return g.missing || !g.bmp; }
+
+// 旋轉後、縮放比例 100% 時的大小；占位框使用固定大小
+static void ImgBaseSize(int i, int* bw, int* bh) {
+    const ImgGroup& g = g_img[i];
+    if (ImgIsPlaceholder(g)) {
+        *bw = kImgPlaceholderW;
+        *bh = kImgPlaceholderH;
+        return;
+    }
+    int w = g.srcW, h = g.srcH;
+    if (g.rot == 90 || g.rot == 270) std::swap(w, h);
+    *bw = std::max(1, w);
+    *bh = std::max(1, h);
+}
+
+static void ImgDispSize(int i, int* w, int* h) {
+    const ImgGroup& g = g_img[i];
+    int bw, bh;
+    ImgBaseSize(i, &bw, &bh);
+    if (ImgIsPlaceholder(g)) {
+        *w = bw;
+        *h = bh;
+        return;
+    }
+    *w = std::max(1, MulDiv(bw, g.scale, 100));
+    *h = std::max(1, MulDiv(bh, g.scale, 100));
+}
+
+// 縮放比例下限：避免縮到看不見 (短邊至少 4 像素、長邊至少 24 像素，而且不低於 10%)
+static int ImgMinScale(int i) {
+    int bw, bh;
+    ImgBaseSize(i, &bw, &bh);
+    long long sh = std::min(bw, bh), lg = std::max(bw, bh);
+    long long a = (100LL * kImgMinShort + sh - 1) / sh;
+    long long b = (100LL * kImgMinLong + lg - 1) / lg;
+    long long m = std::max<long long>(10, std::max(a, b));
+    return (int)std::min<long long>(m, 100);   // 100% 一定允許
+}
+
+// 縮放比例上限：1000%，且縮放後的邊長與像素數不超過上限
+static int ImgMaxScale(int i) {
+    int bw, bh;
+    ImgBaseSize(i, &bw, &bh);
+    long long lg = std::max(bw, bh);
+    long long m = 1000;
+    m = std::min<long long>(m, 100LL * kImgMaxSide / lg);
+    m = std::min<long long>(m, (long long)(std::sqrt((double)kImgMaxPixels / ((double)bw * (double)bh)) * 100.0));
+    return (int)std::max<long long>(m, ImgMinScale(i));
+}
+
+static POINT ImgScreenPos(int i) {
+    const ImgGroup& g = g_img[i];
+    RECT mon = MonitorRectByName(g.monitor);
+    POINT p;
+    p.x = mon.left + g.x;
+    p.y = mon.top + g.y;
+    return p;
+}
+
+// 修正縮放比例與位置：圖片 (縮放後) 必須完整位於所在螢幕內；圖片本身 (100%) 比螢幕大時不限制位置
+static void ImgClamp(int i) {
+    ImgGroup& g = g_img[i];
+    bool ph = ImgIsPlaceholder(g);
+    int mn = ImgMinScale(i), mx = ImgMaxScale(i);
+    if (!ph) g.scale = std::max(mn, std::min(mx, g.scale));
+    RECT mon = MonitorRectByName(g.monitor);
+    int mw = mon.right - mon.left, mh = mon.bottom - mon.top;
+    int bw, bh;
+    ImgBaseSize(i, &bw, &bh);
+    if (bw > mw || bh > mh) return;
+    if (!ph) {
+        int fit = (int)std::min<long long>(100LL * mw / bw, 100LL * mh / bh);
+        if (g.scale > fit) g.scale = std::max(mn, fit);
+    }
+    int dw, dh;
+    ImgDispSize(i, &dw, &dh);
+    if (dw <= mw) g.x = std::max(0, std::min(g.x, mw - dw));
+    if (dh <= mh) g.y = std::max(0, std::min(g.y, mh - dh));
+}
+
+static std::wstring ImgFileName(const std::wstring& p) {
+    size_t k = p.find_last_of(L"\\/");
+    return (k == std::wstring::npos) ? p : p.substr(k + 1);
+}
+
+// 繪製：以 GDI+ 畫到 32bpp 預乘 Alpha 的 DIB，再用 UpdateLayeredWindow 更新視窗。
+// fast = true (拖曳縮放中) 使用較快的內插方式。
+static void ImgRender(int i, bool fast) {
+    ImgGroup& g = g_img[i];
+    if (!g.hwnd) return;
+    int dw, dh;
+    ImgDispSize(i, &dw, &dh);
+    bool unlocked = !ImgIsLocked(i);
+    int pad = unlocked ? kImgPad : 0;
+    int ww = dw + 2 * pad, wh = dh + 2 * pad;
+    if (!g.dc) {
+        HDC sdc = GetDC(NULL);
+        g.dc = CreateCompatibleDC(sdc);
+        ReleaseDC(NULL, sdc);
+        if (!g.dc) return;
+    }
+    if (!g.dib || g.dibW != ww || g.dibH != wh) {
+        if (g.dib) {
+            SelectObject(g.dc, g.oldBmp);
+            DeleteObject(g.dib);
+            g.dib = NULL;
+            g.bits = NULL;
+        }
+        void* bits = NULL;
+        g.dib = CreateDib32(g.dc, ww, wh, &bits);
+        if (!g.dib || !bits) {
+            if (g.dib) DeleteObject(g.dib);
+            g.dib = NULL;
+            g.bits = NULL;
+            g.dibW = g.dibH = 0;
+            return;
+        }
+        g.bits = bits;
+        g.oldBmp = SelectObject(g.dc, g.dib);
+        g.dibW = ww;
+        g.dibH = wh;
+    }
+    {
+        Gdiplus::Bitmap target(ww, wh, ww * 4, PixelFormat32bppPARGB, (BYTE*)g.bits);
+        Gdiplus::Graphics gfx(&target);
+        gfx.Clear(Gdiplus::Color(0, 0, 0, 0));
+        gfx.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
+        if (unlocked) {   // 半透明深色背景
+            Gdiplus::SolidBrush bgb(Gdiplus::Color(150, 20, 20, 20));
+            gfx.FillRectangle(&bgb, 0, 0, ww, wh);
+        }
+        if (ImgIsPlaceholder(g)) {   // 圖片遺失 / 尚未選擇：占位框 + 提示文字
+            Gdiplus::SolidBrush pb(Gdiplus::Color(215, 110, 25, 25));
+            gfx.FillRectangle(&pb, pad, pad, dw, dh);
+            Gdiplus::Pen pp(Gdiplus::Color(255, 255, 200, 0), 1.0f);
+            gfx.DrawRectangle(&pp, pad, pad, dw - 1, dh - 1);
+            std::wstring l1;
+            if (g.source == 3 && !g.path.empty()) {
+                std::wstring fn = ImgFileName(g.path);
+                if (fn.size() > 100) fn.resize(100);
+                wchar_t tb[300];
+                wsprintfW(tb, T(S_IMG_MISSING), fn.c_str());
+                l1 = tb;
+            } else {
+                l1 = T(S_IMG_NOTSET);
+            }
+            std::wstring text = l1 + L"\n" + T(S_IMG_MISSING2);
+            Gdiplus::Font font(L"Segoe UI", 12.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::StringFormat sf;
+            sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+            sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            Gdiplus::SolidBrush tbr(Gdiplus::Color(255, 255, 255, 255));
+            gfx.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+            Gdiplus::RectF rc((Gdiplus::REAL)(pad + 4), (Gdiplus::REAL)(pad + 2), (Gdiplus::REAL)(dw - 8), (Gdiplus::REAL)(dh - 4));
+            gfx.DrawString(text.c_str(), -1, &font, rc, &sf, &tbr);
+        } else {
+            if (g.frames > 1) {
+                GUID tm = Gdiplus::FrameDimensionTime;
+                g.bmp->SelectActiveFrame(&tm, (UINT)g.frame);
+            }
+            Gdiplus::InterpolationMode im = Gdiplus::InterpolationModeHighQualityBicubic;
+            if (g.scale == 100 || (g.source != 3 && g.scale % 100 == 0)) im = Gdiplus::InterpolationModeNearestNeighbor;   // 整數倍：維持像素的銳利
+            else if (fast) im = Gdiplus::InterpolationModeBilinear;
+            gfx.SetInterpolationMode(im);
+            gfx.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            Gdiplus::ImageAttributes ia;
+            ia.SetWrapMode(Gdiplus::WrapModeTileFlipXY);   // 縮放時避免邊緣出現半透明的框
+            if (g.opacity < 100) {   // 不透明度：與圖片本身的 Alpha 相乘
+                Gdiplus::ColorMatrix cm;
+                ZeroMemory(&cm, sizeof(cm));
+                for (int k = 0; k < 5; ++k) cm.m[k][k] = 1.0f;
+                cm.m[3][3] = (Gdiplus::REAL)g.opacity / 100.0f;
+                ia.SetColorMatrix(&cm, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
+            }
+            // 以平行四邊形的三個頂點 (來源的左上 / 右上 / 左下) 表示旋轉與翻轉
+            int xl = pad, yt = pad, xr = pad + dw, yb = pad + dh;
+            Gdiplus::Point ul, ur, ll;
+            switch (g.rot) {
+            case 90:  ul = Gdiplus::Point(xr, yt); ur = Gdiplus::Point(xr, yb); ll = Gdiplus::Point(xl, yt); break;
+            case 180: ul = Gdiplus::Point(xr, yb); ur = Gdiplus::Point(xl, yb); ll = Gdiplus::Point(xr, yt); break;
+            case 270: ul = Gdiplus::Point(xl, yb); ur = Gdiplus::Point(xl, yt); ll = Gdiplus::Point(xr, yb); break;
+            default:  ul = Gdiplus::Point(xl, yt); ur = Gdiplus::Point(xr, yt); ll = Gdiplus::Point(xl, yb); break;
+            }
+            if (g.flipH) {
+                ul.X = xl + xr - ul.X;
+                ur.X = xl + xr - ur.X;
+                ll.X = xl + xr - ll.X;
+            }
+            Gdiplus::Point pts[3] = { ul, ur, ll };
+            gfx.DrawImage(g.bmp, pts, 3, 0, 0, g.srcW, g.srcH, Gdiplus::UnitPixel, &ia);
+        }
+        if (unlocked) {   // 圖片外框 + 四角縮放控制點
+            Gdiplus::Pen op(Gdiplus::Color(220, 255, 255, 255), 1.0f);
+            gfx.DrawRectangle(&op, pad - 1, pad - 1, dw + 1, dh + 1);
+            Gdiplus::SolidBrush hb(Gdiplus::Color(235, 255, 255, 255));
+            Gdiplus::Pen hp(Gdiplus::Color(255, 40, 40, 40), 1.0f);
+            int hx[4] = { 0, pad + dw, 0, pad + dw };
+            int hy[4] = { 0, 0, pad + dh, pad + dh };
+            for (int k = 0; k < 4; ++k) {
+                gfx.FillRectangle(&hb, hx[k], hy[k], pad, pad);
+                gfx.DrawRectangle(&hp, hx[k], hy[k], pad - 1, pad - 1);
+            }
+        }
+        gfx.Flush(Gdiplus::FlushIntentionSync);
+    }
+    POINT sp = ImgScreenPos(i);
+    POINT pos;
+    pos.x = sp.x - pad;
+    pos.y = sp.y - pad;
+    SIZE size;
+    size.cx = ww;
+    size.cy = wh;
+    POINT src;
+    src.x = 0;
+    src.y = 0;
+    BLENDFUNCTION bf;
+    bf.BlendOp = AC_SRC_OVER;
+    bf.BlendFlags = 0;
+    bf.SourceConstantAlpha = 255;
+    bf.AlphaFormat = AC_SRC_ALPHA;
+    HDC sdc = GetDC(NULL);
+    UpdateLayeredWindow(g.hwnd, sdc, &pos, &size, g.dc, &src, 0, &bf, ULW_ALPHA);
+    ReleaseDC(NULL, sdc);
+}
+
+static void ImgPlaceWindow(int i) {
+    ImgGroup& g = g_img[i];
+    if (!g.hwnd) return;
+    int pad = ImgIsLocked(i) ? 0 : kImgPad;
+    POINT p = ImgScreenPos(i);
+    SetWindowPos(g.hwnd, NULL, p.x - pad, p.y - pad, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+// GIF：依影格的顯示時間與播放速度排下一次更新 (每次 WM_TIMER 後重新排)。隱藏 / 暫停 / 靜態圖片不使用計時器
+static void ImgSchedule(int i) {
+    ImgGroup& g = g_img[i];
+    if (!g.hwnd) return;
+    KillTimer(g.hwnd, 1);
+    if (g.frames > 1 && !g.delays.empty() && g.bmp && !g.missing && !g.gifPaused && g.shown) {
+        int d = g.delays[(size_t)g.frame % g.delays.size()];
+        int ms = std::max(20, (int)((long long)d * 100 / std::max(10, g.gifSpeed)));
+        SetTimer(g.hwnd, 1, (UINT)ms, NULL);
+    }
+}
+
+static bool ImgCovered(HWND me) {
+    RECT mr;
+    if (!me || !GetWindowRect(me, &mr)) return false;
+    DWORD gp = g_gamePid;
+    int guard = 0;
+    for (HWND w = GetWindow(me, GW_HWNDPREV); w && guard < 300; w = GetWindow(w, GW_HWNDPREV), ++guard) {
+        if (!IsWindowVisible(w)) continue;
+        RECT r, inter;
+        if (!GetWindowRect(w, &r) || !IntersectRect(&inter, &mr, &r)) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (IsTaskbarClass(w) || (gp && pid == gp)) return true;
+    }
+    return false;
+}
+
+// 依層級由低到高重新置頂 (最後一個在最上面)
+static void ImgRaiseAll() {
+    int order[kImgGroups];
+    ImgZOrder(order);
+    for (int k = 0; k < kImgGroups; ++k) {
+        ImgGroup& g = g_img[order[k]];
+        if (g.hwnd && g.shown) SetWindowPos(g.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+// 有圖片顯示時，每 100 毫秒檢查一次有沒有被工作列 / 遊戲視窗蓋住，被蓋住才重新置頂；沒有圖片顯示就不需要計時器
+static void ImgCoverTimer() {
+    bool any = false;
+    for (int i = 0; i < kImgGroups; ++i) {
+        if (g_img[i].hwnd && g_img[i].shown) any = true;
+    }
+    if (!g_hWnd) return;
+    if (any) SetTimer(g_hWnd, 9, 100, NULL);
+    else KillTimer(g_hWnd, 9);
+}
+
+static void ImgCheckCovered() {
+    for (int i = 0; i < kImgGroups; ++i) {
+        if (g_img[i].hwnd && g_img[i].shown && ImgCovered(g_img[i].hwnd)) {
+            ImgRaiseAll();
+            return;
+        }
+    }
+}
+
+// 鎖定：整個視窗滑鼠穿透且不會被啟動 (不搶遊戲的焦點)；未鎖定：可以點選 / 拖曳，點選後可用方向鍵微調
+static void ImgApplyStyle(int i) {
+    ImgGroup& g = g_img[i];
+    if (!g.hwnd) return;
+    LONG_PTR ex = GetWindowLongPtrW(g.hwnd, GWL_EXSTYLE);
+    LONG_PTR want = ex;
+    if (ImgIsLocked(i)) want |= (WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
+    else want &= ~(LONG_PTR)(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
+    if (want != ex) SetWindowLongPtrW(g.hwnd, GWL_EXSTYLE, want);
+}
+
+static void ImgSetShown(int i, bool show) {
+    ImgGroup& g = g_img[i];
+    if (!g.hwnd) return;
+    if (show && !g.shown) {
+        ImgRender(i, false);
+        ShowWindow(g.hwnd, SW_SHOWNA);
+        g.shown = true;
+        ImgRaiseAll();
+        ImgSchedule(i);
+    } else if (!show && g.shown) {
+        KillTimer(g.hwnd, 1);
+        ShowWindow(g.hwnd, SW_HIDE);
+        g.shown = false;
+    }
+    ImgCoverTimer();
+}
+
+// 這一組現在是否該顯示：總開關 + 啟用；「僅在遊戲視窗為前景時顯示」時，前景是本工具 (選單 / 設定視窗 / 圖片本身) 或工作列則維持目前狀態
+static bool ImgWantShow(int i) {
+    const ImgGroup& g = g_img[i];
+    if (!g_imgMaster || !g.enabled) return false;
+    if (!g.fgOnly) return true;
+    DWORD gp = g_gamePid;
+    if (!gp) return false;
+    HWND fg = GetForegroundWindow();
+    DWORD fgPid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &fgPid);
+    if (fg && (fgPid == GetCurrentProcessId() || IsTaskbarClass(fg))) return g.shown;
+    return fgPid == gp;
+}
+
+static void ImgUpdateVisibility() {
+    for (int i = 0; i < kImgGroups; ++i) {
+        ImgGroup& g = g_img[i];
+        if (!g.hwnd) continue;
+        bool want = ImgWantShow(i);
+        if (want != g.shown) ImgSetShown(i, want);
+    }
+}
+
+static void ImgDestroy(int i) {
+    ImgGroup& g = g_img[i];
+    if (g.hwnd) {
+        KillTimer(g.hwnd, 1);
+        if (GetCapture() == g.hwnd) ReleaseCapture();
+        HWND h = g.hwnd;
+        g.hwnd = NULL;
+        DestroyWindow(h);
+    }
+    g.shown = false;
+    ImgFreeImage(i);
+    ImgFreeDib(i);
+    ImgCoverTimer();
+}
+
+struct ImgDragState {
+    int idx, mode;   // mode：0 = 沒有拖曳，1 = 移動，2 = 縮放
+    POINT cur0, abs0, anchor;
+    int sx, sy;
+    std::wstring mon;
+    RECT monRc;
+};
+static ImgDragState g_imgDrag;
+
+// 視窗內的位置落在哪個控制點：0 = 左上，1 = 右上，2 = 左下，3 = 右下，-1 = 不在控制點上
+static int ImgHitCorner(int px, int py, int w, int h) {
+    if (px < kImgPad && py < kImgPad) return 0;
+    if (px >= w - kImgPad && py < kImgPad) return 1;
+    if (px < kImgPad && py >= h - kImgPad) return 2;
+    if (px >= w - kImgPad && py >= h - kImgPad) return 3;
+    return -1;
+}
+
+static LRESULT CALLBACK ImgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_NCCREATE) {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams);
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    int i = (int)GetWindowLongPtrW(hwnd, GWLP_USERDATA) - 1;
+    if (i < 0 || i >= kImgGroups || g_img[i].hwnd != hwnd) return DefWindowProcW(hwnd, msg, wp, lp);
+    ImgGroup& g = g_img[i];
+    switch (msg) {
+    case WM_NCHITTEST:
+        return HTCLIENT;
+    case WM_MOUSEACTIVATE:
+        return ImgIsLocked(i) ? MA_NOACTIVATE : MA_ACTIVATE;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SETCURSOR:
+        if (!ImgIsLocked(i)) {
+            POINT p;
+            GetCursorPos(&p);
+            ScreenToClient(hwnd, &p);
+            RECT cr;
+            GetClientRect(hwnd, &cr);
+            int corner = ImgIsPlaceholder(g) ? -1 : ImgHitCorner(p.x, p.y, cr.right, cr.bottom);
+            int cur = 32646;   // IDC_SIZEALL
+            if (corner == 0 || corner == 3) cur = 32642;   // IDC_SIZENWSE
+            else if (corner == 1 || corner == 2) cur = 32643;   // IDC_SIZENESW
+            SetCursor(LoadCursor(NULL, MAKEINTRESOURCE(cur)));
+            return TRUE;
+        }
+        break;
+    case WM_LBUTTONDOWN: {
+        if (ImgIsLocked(i)) return 0;
+        POINT c;
+        GetCursorPos(&c);
+        RECT cr;
+        GetClientRect(hwnd, &cr);
+        int corner = ImgIsPlaceholder(g) ? -1 : ImgHitCorner((short)LOWORD(lp), (short)HIWORD(lp), cr.right, cr.bottom);
+        SetForegroundWindow(hwnd);   // 取得鍵盤焦點 (方向鍵微調)
+        SetFocus(hwnd);
+        POINT p = ImgScreenPos(i);
+        int dw, dh;
+        ImgDispSize(i, &dw, &dh);
+        g_imgDrag.idx = i;
+        g_imgDrag.cur0 = c;
+        if (corner >= 0) {
+            g_imgDrag.mode = 2;
+            g_imgDrag.sx = (corner == 1 || corner == 3) ? 1 : -1;
+            g_imgDrag.sy = (corner >= 2) ? 1 : -1;
+            g_imgDrag.anchor.x = (g_imgDrag.sx > 0) ? p.x : p.x + dw;   // 對角的角落固定不動
+            g_imgDrag.anchor.y = (g_imgDrag.sy > 0) ? p.y : p.y + dh;
+            g_imgDrag.mon = g.monitor;
+            g_imgDrag.monRc = MonitorRectByName(g.monitor);
+        } else {
+            g_imgDrag.mode = 1;
+            g_imgDrag.abs0 = p;
+        }
+        SetCapture(hwnd);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        if (!g_imgDrag.mode || g_imgDrag.idx != i) break;
+        POINT c;
+        GetCursorPos(&c);
+        if (g_imgDrag.mode == 1) {
+            LONG ax = g_imgDrag.abs0.x + (c.x - g_imgDrag.cur0.x);
+            LONG ay = g_imgDrag.abs0.y + (c.y - g_imgDrag.cur0.y);
+            int dw, dh;
+            ImgDispSize(i, &dw, &dh);
+            POINT ctr;
+            ctr.x = ax + dw / 2;
+            ctr.y = ay + dh / 2;
+            HMONITOR hm = MonitorFromPoint(ctr, MONITOR_DEFAULTTONEAREST);   // 以圖片中心所在的螢幕為準
+            MONITORINFOEXW mi;
+            ZeroMemory(&mi, sizeof(mi));
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(hm, (MONITORINFO*)&mi)) {
+                g.monitor = mi.szDevice;
+                g.x = (int)(ax - mi.rcMonitor.left);
+                g.y = (int)(ay - mi.rcMonitor.top);
+            }
+            ImgClamp(i);
+            ImgPlaceWindow(i);
+        } else {
+            // 等比例縮放：把游標相對於對角的位移，投影到圖片的對角線方向，換算成縮放比例
+            int bw, bh;
+            ImgBaseSize(i, &bw, &bh);
+            double vx = (double)(c.x - g_imgDrag.anchor.x) * g_imgDrag.sx;
+            double vy = (double)(c.y - g_imgDrag.anchor.y) * g_imgDrag.sy;
+            double s = (vx * bw + vy * bh) / ((double)bw * bw + (double)bh * bh);
+            int ns = (int)std::floor(s * 100.0 + 0.5);
+            ns = std::max(ImgMinScale(i), std::min(ImgMaxScale(i), ns));
+            const RECT& mr = g_imgDrag.monRc;
+            int mw = mr.right - mr.left, mh = mr.bottom - mr.top;
+            if (bw <= mw && bh <= mh) {   // 受限制時，縮放不得超出螢幕範圍
+                long long roomW = (g_imgDrag.sx > 0) ? (mr.right - g_imgDrag.anchor.x) : (g_imgDrag.anchor.x - mr.left);
+                long long roomH = (g_imgDrag.sy > 0) ? (mr.bottom - g_imgDrag.anchor.y) : (g_imgDrag.anchor.y - mr.top);
+                long long fit = std::min(roomW * 100 / bw, roomH * 100 / bh);
+                if (ns > fit) ns = (int)std::max<long long>(ImgMinScale(i), fit);
+            }
+            g.scale = ns;
+            int dw, dh;
+            ImgDispSize(i, &dw, &dh);
+            int nx = (g_imgDrag.sx > 0) ? g_imgDrag.anchor.x : g_imgDrag.anchor.x - dw;
+            int ny = (g_imgDrag.sy > 0) ? g_imgDrag.anchor.y : g_imgDrag.anchor.y - dh;
+            g.monitor = g_imgDrag.mon;
+            g.x = nx - mr.left;
+            g.y = ny - mr.top;
+            ImgClamp(i);
+            ImgRender(i, true);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP:
+    case WM_CAPTURECHANGED:
+        if (g_imgDrag.mode && g_imgDrag.idx == i) {
+            int mode = g_imgDrag.mode;
+            g_imgDrag.mode = 0;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            if (mode == 2) ImgRender(i, false);   // 縮放結束：以正常品質重繪
+            ImgSaveGeom(i);
+            ImgNotifyDlg(i);
+        }
+        return 0;
+    case WM_KEYDOWN: {   // 未鎖定時：方向鍵以 1 像素微調位置 (按住 Shift 為 10 像素)
+        if (ImgIsLocked(i)) break;
+        int step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10 : 1;
+        int dx = 0, dy = 0;
+        if (wp == VK_LEFT) dx = -step;
+        else if (wp == VK_RIGHT) dx = step;
+        else if (wp == VK_UP) dy = -step;
+        else if (wp == VK_DOWN) dy = step;
+        else break;
+        g.x += dx;
+        g.y += dy;
+        ImgClamp(i);
+        ImgPlaceWindow(i);
+        ImgSaveGeom(i);
+        ImgNotifyDlg(i);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == 1) {
+            KillTimer(hwnd, 1);
+            if (g.frames > 1 && g.shown) {
+                g.frame = (g.frame + 1) % g.frames;
+                ImgRender(i, false);
+                ImgSchedule(i);
+            }
+            return 0;
+        }
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static bool ImgEnsureWindow(int i) {
+    ImgGroup& g = g_img[i];
+    if (g.hwnd) return true;
+    if (!g_imgClassReg) {
+        WNDCLASSEXW wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = ImgProc;
+        wc.hInstance = g_hInst;
+        wc.lpszClassName = L"MabinogiClientManagerImage";
+        RegisterClassExW(&wc);
+        g_imgClassReg = true;
+    }
+    DWORD ex = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+    if (ImgIsLocked(i)) ex |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+    HWND h = CreateWindowExW(ex, L"MabinogiClientManagerImage", L"ClientManagerImage", WS_POPUP, 0, 0, 1, 1, NULL, NULL, g_hInst, (LPVOID)(INT_PTR)(i + 1));
+    if (!h) return false;
+    g.hwnd = h;
+    g.shown = false;
+    ExcludeFromPeek(h);
+    return true;
+}
+
+// 把這一組的狀態 (啟用 / 顯示 / 鎖定 / 圖片 / 位置大小...) 套用到視窗。notify = true (使用者操作) 時，圖片載入失敗會提示
+static void ImgSync(int i, bool notify) {
+    ImgGroup& g = g_img[i];
+    if (!(g.enabled && g_imgMaster)) {   // 不需要顯示的組別不保留視窗與圖片 (省記憶體)
+        ImgDestroy(i);
+        return;
+    }
+    if (!ImgEnsureGdip() || !ImgEnsureWindow(i)) return;
+    if (!g.loaded || g.loadedSig != ImgSigOf(g)) {
+        bool ok = ImgLoad(i);
+        if (!ok && notify && !(g.source == 3 && g.path.empty())) {
+            std::wstring p = g.path;
+            if (p.size() > 600) p.resize(600);
+            wchar_t b[1100];
+            wsprintfW(b, T(S_IMG_LOADFAIL), i + 1, p.c_str());
+            Notify(b);
+        }
+    }
+    ImgClamp(i);
+    ImgApplyStyle(i);
+    if (g.shown) ImgRender(i, false);
+    ImgSetShown(i, ImgWantShow(i));
+    ImgSchedule(i);
+}
+
+static void ImgSyncAll() {
+    for (int i = 0; i < kImgGroups; ++i) ImgSync(i, false);
+    ImgUpdateVisibility();
+    ImgRaiseAll();
+}
+
+static void ImgShutdown() {
+    for (int i = 0; i < kImgGroups; ++i) ImgDestroy(i);
+    if (g_hWnd) KillTimer(g_hWnd, 9);
+    if (g_gdipOn) {
+        Gdiplus::GdiplusShutdown(g_gdipToken);
+        g_gdipOn = false;
+    }
+}
+
+// 層級：把這一組移到指定的層級，原本在那個層級的組別換到這一組原本的層級
+static void ImgSetZ(int i, int newZ) {
+    if (newZ < 0 || newZ >= kImgGroups || g_img[i].z == newZ) return;
+    int old = g_img[i].z;
+    for (int j = 0; j < kImgGroups; ++j) {
+        if (j != i && g_img[j].z == newZ) {
+            g_img[j].z = old;
+            SaveIntS(ImgSec(j), L"Z", old);
+        }
+    }
+    g_img[i].z = newZ;
+    SaveIntS(ImgSec(i), L"Z", newZ);
+    ImgRaiseAll();
+}
+
+static bool ImgBrowse(HWND owner, std::wstring& path) {
+    wchar_t file[MAX_PATH * 2];
+    file[0] = 0;
+    if (!path.empty()) lstrcpynW(file, path.c_str(), MAX_PATH * 2);
+    std::wstring filter = T(S_IMG_FILTER);
+    filter.push_back(L'\0');
+    filter += L"*.jpg;*.jpeg;*.png;*.gif";
+    filter.push_back(L'\0');
+    filter.push_back(L'\0');
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter.c_str();
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH * 2;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return false;
+    path = file;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //  監控設定視窗：套用 (立即變更監控畫面) / 確定 (儲存到 ini) / 取消 (回復到開啟前的狀態)
 // ---------------------------------------------------------------------------
@@ -4071,8 +5222,9 @@ static void OverlayChanged() {
 }
 
 // 設定視窗的頁面 (左側選單)
-enum SetPage { SP_WINDOW = 0, SP_PRIO, SP_CPU, SP_MON, SP_OTHER, SP_ABOUT, SP_COUNT };
+enum SetPage { SP_WINDOW = 0, SP_PRIO, SP_CPU, SP_MON, SP_IMG, SP_OTHER, SP_ABOUT, SP_COUNT };
 #define WM_SD_SELPAGE (WM_APP + 10)   // 切換到指定的頁面 (wp = 頁面)
+#define WM_SD_IMGCHANGED (WM_APP + 11)   // 圖片置頂：圖片被拖曳 / 縮放 / 微調 (wp = 組別，-1 = 全部重新載入)
 
 static const wchar_t* PrioName(int lv);
 static const wchar_t* IoName(int lv);
@@ -4352,6 +5504,10 @@ enum SetDlgIds {
     SD_AUTO_BASE = 6500     // 靜態文字 / 群組框的自動編號
 };
 enum { AB_LOG = 3001, AB_COPY, AB_PAUSE, AB_LINK };
+enum ImgDlgIds {
+    SD_I_MASTER = 6100, SD_I_LOCKALL, SD_I_SEL, SD_I_ENABLE, SD_I_LOCK, SD_I_NAME, SD_I_SRC, SD_I_PATH, SD_I_BROWSE,
+    SD_I_OPACITY, SD_I_SCALE, SD_I_X, SD_I_Y, SD_I_W, SD_I_H, SD_I_FLIP, SD_I_ROT, SD_I_Z, SD_I_FGONLY, SD_I_GIFPAUSE, SD_I_GIFSPEED, SD_I_COLOR, SD_I_COLORSW, SD_I_RESETSIZE
+};
 
 static HWND g_setDlg = NULL;   // 設定視窗
 
@@ -4366,6 +5522,8 @@ struct SetCtx : MonDlgCtx {
     SetVals base;                 // 開啟 / 上次套用時的值：只有和它不同的項目才會被套用，不會蓋掉在視窗外 (選單、連點圖示) 做的變更
     OvSettings monBase;           // 監控頁：開啟 / 上次套用時的值
     int page;
+    int imgSel;                   // 圖片置頂頁：目前選擇的組別 (0 ~ 9)
+    HBRUSH imgSw;                 // 圖片置頂頁：自訂顏色的色塊預覽用的筆刷
     bool reopen;                  // 變更語言後重新建立視窗
     std::vector<std::pair<WORD, int> > pageOf;   // 控制項 -> 所屬頁面 (-1 = 每頁都顯示)
     HFONT font;                   // 診斷記錄用的等寬字型
@@ -4598,6 +5756,342 @@ static bool CommitSettings(HWND dlg, SetCtx* c, bool save, bool* langChanged) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+//  圖片置頂頁：此頁的變更立即生效並寫入 ini (不經過下方的「確定 / 取消 / 套用」)；
+//  圖片被拖曳 / 縮放 / 方向鍵微調後，ImgNotifyDlg 會通知這裡更新位置與大小欄位
+// ---------------------------------------------------------------------------
+static void ImgPageFillSel(HWND dlg, SetCtx* c) {
+    HWND cb = GetDlgItem(dlg, SD_I_SEL);
+    SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+    for (int k = 0; k < kImgGroups; ++k) {
+        wchar_t b[64];
+        wsprintfW(b, T(S_IMG_GROUPN), k + 1);
+        std::wstring s = b;
+        if (!g_img[k].name.empty()) {
+            s += L" - ";
+            s += g_img[k].name;
+        }
+        ComboAdd(dlg, SD_I_SEL, s.c_str(), k);
+    }
+    SendMessageW(cb, CB_SETCURSEL, (WPARAM)c->imgSel, 0);
+}
+
+// 只在內容不同時才更新欄位，避免打斷使用者正在輸入的欄位
+static void ImgSetEditInt(HWND dlg, int id, int v, bool isSigned) {
+    BOOL ok = FALSE;
+    int cur = (int)GetDlgItemInt(dlg, id, &ok, isSigned ? TRUE : FALSE);
+    if (ok && cur == v) return;
+    SetDlgItemInt(dlg, id, (UINT)v, isSigned ? TRUE : FALSE);
+}
+
+static void ImgSetEditText(HWND dlg, int id, const std::wstring& s) {
+    wchar_t b[1100];
+    b[0] = 0;
+    GetDlgItemTextW(dlg, id, b, 1100);
+    if (s == b) return;
+    SetDlgItemTextW(dlg, id, s.c_str());
+}
+
+static void ImgPageLoadGeom(HWND dlg, SetCtx* c) {
+    int i = c->imgSel;
+    const ImgGroup& g = g_img[i];
+    int dw, dh;
+    ImgDispSize(i, &dw, &dh);
+    ImgSetEditInt(dlg, SD_I_OPACITY, g.opacity, false);
+    ImgSetEditInt(dlg, SD_I_SCALE, g.scale, false);
+    ImgSetEditInt(dlg, SD_I_X, g.x, true);
+    ImgSetEditInt(dlg, SD_I_Y, g.y, true);
+    ImgSetEditInt(dlg, SD_I_W, dw, false);
+    ImgSetEditInt(dlg, SD_I_H, dh, false);
+    bool ph = ImgIsPlaceholder(g);
+    EnableWindow(GetDlgItem(dlg, SD_I_SCALE), !ph);
+    EnableWindow(GetDlgItem(dlg, SD_I_W), !ph);
+    EnableWindow(GetDlgItem(dlg, SD_I_H), !ph);
+}
+
+// 自訂顏色的色塊預覽：隨輸入即時更新，格式不對時顯示灰色
+static void ImgUpdateSwatch(HWND dlg, SetCtx* c) {
+    wchar_t b[32];
+    b[0] = 0;
+    GetDlgItemTextW(dlg, SD_I_COLOR, b, 32);
+    bool ok = false;
+    unsigned int v = ParseHexColor(b, 0, &ok);
+    COLORREF col = ok ? RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF) : RGB(200, 200, 200);
+    if (c->imgSw) DeleteObject(c->imgSw);
+    c->imgSw = CreateSolidBrush(col);
+    InvalidateRect(GetDlgItem(dlg, SD_I_COLORSW), NULL, TRUE);
+}
+
+static void ImgPageLoad(HWND dlg, SetCtx* c) {
+    int i = c->imgSel;
+    const ImgGroup& g = g_img[i];
+    DlgSetChecked(dlg, SD_I_MASTER, g_imgMaster);
+    DlgSetChecked(dlg, SD_I_LOCKALL, g_imgLockAll);
+    ImgPageFillSel(dlg, c);
+    DlgSetChecked(dlg, SD_I_ENABLE, g.enabled);
+    DlgSetChecked(dlg, SD_I_LOCK, g.locked);
+    ImgSetEditText(dlg, SD_I_NAME, g.name);
+    ComboSelectValue(dlg, SD_I_SRC, g.source, L"?");
+    ImgSetEditText(dlg, SD_I_PATH, g.path);
+    DlgSetChecked(dlg, SD_I_FLIP, g.flipH);
+    ComboSelectValue(dlg, SD_I_ROT, g.rot, L"?");
+    ComboSelectValue(dlg, SD_I_Z, g.z, L"?");
+    DlgSetChecked(dlg, SD_I_FGONLY, g.fgOnly);
+    DlgSetChecked(dlg, SD_I_GIFPAUSE, g.gifPaused);
+    ComboSelectValue(dlg, SD_I_GIFSPEED, g.gifSpeed, ComboLabel(1, g.gifSpeed));
+    ImgPageLoadGeom(dlg, c);
+    // 白色 / 黑色時顯示實際使用的顏色 (只是顯示，不會寫入 RulerColor)；選回自訂顏色時恢復成使用者設定的值
+    ImgSetEditText(dlg, SD_I_COLOR, HexColorText(g.source == 0 ? 0xFFFFFFu : (g.source == 1 ? 0x000000u : g.rulerColor)));
+    ImgUpdateSwatch(dlg, c);
+    EnableWindow(GetDlgItem(dlg, SD_I_COLOR), g.source == 2);
+    bool file = (g.source == 3);
+    EnableWindow(GetDlgItem(dlg, SD_I_PATH), file);
+    EnableWindow(GetDlgItem(dlg, SD_I_BROWSE), file);
+    bool anim = (g.frames > 1);   // GIF 設定只有動態圖片才能使用
+    EnableWindow(GetDlgItem(dlg, SD_I_GIFPAUSE), anim);
+    EnableWindow(GetDlgItem(dlg, SD_I_GIFSPEED), anim);
+}
+
+// 把輸入欄位的內容 (名稱 / 路徑 / 不透明度 / 縮放 / 位置 / 大小) 套用到目前選擇的組別；只處理和目前不同的欄位
+static void ImgPageApplyEdits(HWND dlg, SetCtx* c) {
+    int i = c->imgSel;
+    ImgGroup& g = g_img[i];
+    bool changed = false, nameChanged = false, pathChanged = false;
+    wchar_t buf[1100];
+    buf[0] = 0;
+    GetDlgItemTextW(dlg, SD_I_NAME, buf, 41);
+    if (g.name != buf) {
+        g.name = buf;
+        nameChanged = changed = true;
+    }
+    if (g.source == 3) {
+        buf[0] = 0;
+        GetDlgItemTextW(dlg, SD_I_PATH, buf, 1000);
+        std::wstring p = buf;
+        if (p.size() >= 2 && p.front() == L'"' && p.back() == L'"') p = p.substr(1, p.size() - 2);   // 貼上「複製為路徑」時會帶引號
+        if (p != g.path) {
+            g.path = p;
+            pathChanged = changed = true;
+        }
+    }
+    if (g.source == 2) {   // 自訂顏色：RRGGBB，格式不對時還原成目前的顏色
+        buf[0] = 0;
+        GetDlgItemTextW(dlg, SD_I_COLOR, buf, 16);
+        bool cok = false;
+        unsigned int cv = ParseHexColor(buf, g.rulerColor, &cok);
+        if (!cok) {
+            ImgSetEditText(dlg, SD_I_COLOR, HexColorText(g.rulerColor));
+        } else if (cv != g.rulerColor) {
+            g.rulerColor = cv;
+            changed = true;
+        }
+    }
+    BOOL ok = FALSE;
+    UINT ov = GetDlgItemInt(dlg, SD_I_OPACITY, &ok, FALSE);
+    if (ok) {
+        int o = (int)std::max<UINT>(5, std::min<UINT>(100, ov));
+        if (o != g.opacity) {
+            g.opacity = o;
+            changed = true;
+        }
+    }
+    if (!ImgIsPlaceholder(g)) {
+        int dw, dh, bw, bh;
+        ImgDispSize(i, &dw, &dh);
+        ImgBaseSize(i, &bw, &bh);
+        UINT sc = GetDlgItemInt(dlg, SD_I_SCALE, &ok, FALSE);
+        if (ok && (int)sc != g.scale) {
+            g.scale = (int)std::min<UINT>(sc, 100000);
+            changed = true;
+        } else {
+            UINT w = GetDlgItemInt(dlg, SD_I_W, &ok, FALSE);
+            if (ok && (int)w != dw) {
+                g.scale = (int)std::min<double>(100000.0, (double)w * 100.0 / bw + 0.5);   // 寬 / 高會維持圖片的長寬比
+                changed = true;
+            } else {
+                UINT h = GetDlgItemInt(dlg, SD_I_H, &ok, FALSE);
+                if (ok && (int)h != dh) {
+                    g.scale = (int)std::min<double>(100000.0, (double)h * 100.0 / bh + 0.5);
+                    changed = true;
+                }
+            }
+        }
+    }
+    int xv = (int)GetDlgItemInt(dlg, SD_I_X, &ok, TRUE);
+    if (ok && xv != g.x) {
+        g.x = xv;
+        changed = true;
+    }
+    int yv = (int)GetDlgItemInt(dlg, SD_I_Y, &ok, TRUE);
+    if (ok && yv != g.y) {
+        g.y = yv;
+        changed = true;
+    }
+    if (!changed) return;
+    ImgSaveAll(i);
+    ImgSync(i, pathChanged);
+    if (nameChanged) ImgPageFillSel(dlg, c);
+    ImgPageLoad(dlg, c);   // 顯示修正後 (例如超出螢幕範圍) 的實際數值
+}
+
+// 處理圖片置頂頁的控制項；回傳 true = 已處理
+static bool ImgPageCommand(HWND dlg, SetCtx* c, int id, int code) {
+    if (id < SD_I_MASTER || id > SD_I_RESETSIZE) return false;
+    int i = c->imgSel;
+    ImgGroup& g = g_img[i];
+    if (id == SD_I_COLOR && code == EN_CHANGE) {
+        ImgUpdateSwatch(dlg, c);
+        return true;
+    }
+    if (id == SD_I_COLORSW) return true;
+    bool click = (code == BN_CLICKED);
+    bool sel = (code == CBN_SELCHANGE);
+    switch (id) {
+    case SD_I_MASTER:
+        if (click) {
+            g_imgMaster = DlgChecked(dlg, id);
+            SaveInt(L"ImgMaster", g_imgMaster ? 1 : 0);
+            ImgSyncAll();
+        }
+        break;
+    case SD_I_LOCKALL:
+        if (click) {
+            g_imgLockAll = DlgChecked(dlg, id);
+            SaveInt(L"ImgLockAll", g_imgLockAll ? 1 : 0);
+            ImgSyncAll();
+        }
+        break;
+    case SD_I_SEL:
+        if (sel) {
+            ImgPageApplyEdits(dlg, c);   // 先套用上一組還沒套用的輸入
+            c->imgSel = std::max(0, std::min(kImgGroups - 1, ComboValue(dlg, id, c->imgSel)));
+            ImgPageLoad(dlg, c);
+        }
+        break;
+    case SD_I_ENABLE:
+        if (click) {
+            g.enabled = DlgChecked(dlg, id);
+            ImgSaveAll(i);
+            ImgSync(i, true);
+            ImgPageLoad(dlg, c);
+        }
+        break;
+    case SD_I_LOCK:
+        if (click) {
+            g.locked = DlgChecked(dlg, id);
+            ImgSaveAll(i);
+            ImgSync(i, false);
+        }
+        break;
+    case SD_I_SRC:
+        if (sel) {
+            g.source = ComboValue(dlg, id, g.source);
+            ImgSaveAll(i);
+            ImgSync(i, true);
+            ImgPageLoad(dlg, c);
+        }
+        break;
+    case SD_I_BROWSE:
+        if (click) {
+            std::wstring p = g.path;
+            if (ImgBrowse(dlg, p)) {
+                g.path = p;
+                g.source = 3;
+                ImgSaveAll(i);
+                ImgSync(i, true);
+                ImgPageLoad(dlg, c);
+            }
+        }
+        break;
+    case SD_I_FLIP:
+        if (click) {
+            g.flipH = DlgChecked(dlg, id);
+            ImgSaveAll(i);
+            ImgSync(i, false);
+        }
+        break;
+    case SD_I_ROT:
+        if (sel) {
+            g.rot = ComboValue(dlg, id, g.rot);
+            ImgSync(i, false);   // 旋轉 90 / 270 度時寬高互換，位置也會跟著修正
+            ImgSaveAll(i);
+            ImgPageLoadGeom(dlg, c);
+        }
+        break;
+    case SD_I_Z:
+        if (sel) ImgSetZ(i, ComboValue(dlg, id, g.z));
+        break;
+    case SD_I_FGONLY:
+        if (click) {
+            g.fgOnly = DlgChecked(dlg, id);
+            ImgSaveAll(i);
+            ImgSync(i, false);
+        }
+        break;
+    case SD_I_GIFPAUSE:
+        if (click) {
+            g.gifPaused = DlgChecked(dlg, id);
+            ImgSaveAll(i);
+            ImgSchedule(i);
+        }
+        break;
+    case SD_I_GIFSPEED:
+        if (sel) {
+            g.gifSpeed = ComboValue(dlg, id, g.gifSpeed);
+            ImgSaveAll(i);
+            ImgSchedule(i);
+        }
+        break;
+    case SD_I_RESETSIZE:
+        if (click) {
+            g.scale = 100;
+            ImgSync(i, false);
+            ImgSaveAll(i);
+            ImgPageLoadGeom(dlg, c);
+        }
+        break;
+    default:   // 輸入欄位：離開欄位時套用
+        if (code == EN_KILLFOCUS) ImgPageApplyEdits(dlg, c);
+        break;
+    }
+    return true;
+}
+
+static void ImgPageInit(HWND dlg, SetCtx* c) {
+    c->imgSel = 0;
+    ComboAdd(dlg, SD_I_SRC, T(S_IMG_SRC_W), 0);
+    ComboAdd(dlg, SD_I_SRC, T(S_IMG_SRC_B), 1);
+    ComboAdd(dlg, SD_I_SRC, T(S_IMG_SRC_C), 2);
+    ComboAdd(dlg, SD_I_SRC, T(S_IMG_SRC_F), 3);
+    static const int rots[4] = { 0, 90, 180, 270 };
+    for (int k = 0; k < 4; ++k) {
+        wchar_t b[16];
+        wsprintfW(b, L"%d\u00B0", rots[k]);
+        ComboAdd(dlg, SD_I_ROT, b, rots[k]);
+    }
+    for (int k = 0; k < kImgGroups; ++k) {
+        wchar_t b[16];
+        wsprintfW(b, L"%d", k + 1);
+        ComboAdd(dlg, SD_I_Z, b, k);
+    }
+    static const int speeds[] = { 25, 50, 75, 100, 150, 200, 300 };
+    for (int k = 0; k < (int)(sizeof(speeds) / sizeof(speeds[0])); ++k) ComboAdd(dlg, SD_I_GIFSPEED, ComboLabel(1, speeds[k]).c_str(), speeds[k]);
+    SendDlgItemMessageW(dlg, SD_I_COLOR, EM_LIMITTEXT, 7, 0);
+    SendDlgItemMessageW(dlg, SD_I_NAME, EM_LIMITTEXT, 40, 0);
+    SendDlgItemMessageW(dlg, SD_I_PATH, EM_LIMITTEXT, 1000, 0);
+    SendDlgItemMessageW(dlg, SD_I_OPACITY, EM_LIMITTEXT, 3, 0);
+    SendDlgItemMessageW(dlg, SD_I_SCALE, EM_LIMITTEXT, 5, 0);
+    SendDlgItemMessageW(dlg, SD_I_W, EM_LIMITTEXT, 5, 0);
+    SendDlgItemMessageW(dlg, SD_I_H, EM_LIMITTEXT, 5, 0);
+    SendDlgItemMessageW(dlg, SD_I_X, EM_LIMITTEXT, 7, 0);
+    SendDlgItemMessageW(dlg, SD_I_Y, EM_LIMITTEXT, 7, 0);
+    ImgPageLoad(dlg, c);
+}
+
+static void ImgNotifyDlg(int idx) {
+    if (g_setDlg) PostMessageW(g_setDlg, WM_SD_IMGCHANGED, (WPARAM)idx, 0);
+}
+
 // 記錄區塊正在被使用者操作 (選取文字 / 捲動) 時不更新內容
 static bool AboutLogBusy(HWND ed) {
     DWORD selStart = 0, selEnd = 0;
@@ -4704,7 +6198,7 @@ static void MonPageInit(HWND dlg, SetCtx* c) {
 
 static void SetupSettingsDlg(HWND dlg, SetCtx* c) {
     // 左側選單
-    static const int navText[SP_COUNT] = { S_CAT_WINDOW, S_CAT_PRIO, S_CAT_CPU, S_M_MON, S_CAT_OTHER, S_ABOUT_TITLE };
+    static const int navText[SP_COUNT] = { S_CAT_WINDOW, S_CAT_PRIO, S_CAT_CPU, S_M_MON, S_M_IMG, S_CAT_OTHER, S_ABOUT_TITLE };
     for (int i = 0; i < SP_COUNT; ++i) SendDlgItemMessageW(dlg, SD_NAV, LB_ADDSTRING, 0, (LPARAM)T(navText[i]));
     // 遊戲視窗
     ComboAdd(dlg, SD_W_LOCKSTYLE, T(S_LOCKSTYLE_0), 0);
@@ -4757,6 +6251,7 @@ static void SetupSettingsDlg(HWND dlg, SetCtx* c) {
     for (int l = UL_ZHTW; l <= UL_KO; ++l) ComboAdd(dlg, SD_O_LANG, LangLabel(l), l);
     LoadSetVals(dlg, c->base);
     MonPageInit(dlg, c);
+    ImgPageInit(dlg, c);
     // 關於：診斷記錄用等寬字型、連結用底線字型
     c->font = CreateFontW(-MulDiv(9, OverlayDpi(), 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
@@ -4830,6 +6325,12 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
     case WM_SD_SELPAGE:
         if (c) SelectPage(dlg, c, (int)wp);
         return TRUE;
+    case WM_SD_IMGCHANGED:
+        if (c) {
+            if ((int)wp < 0) ImgPageLoad(dlg, c);
+            else if ((int)wp == c->imgSel) ImgPageLoadGeom(dlg, c);
+        }
+        return TRUE;
     case WM_MEASUREITEM: {   // 左側選單：每一項的高度
         MEASUREITEMSTRUCT* mi = (MEASUREITEMSTRUCT*)lp;
         if (mi->CtlID != SD_NAV) break;
@@ -4861,6 +6362,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
         return TRUE;
     case WM_CTLCOLORSTATIC: {
         int id = GetDlgCtrlID((HWND)lp);
+        if (c && id == SD_I_COLORSW && c->imgSw) return (INT_PTR)c->imgSw;
         if (c && id == MD_TEXTSWATCH && c->sw[0]) return (INT_PTR)c->sw[0];
         if (c && id == MD_OUTSWATCH && c->sw[1]) return (INT_PTR)c->sw[1];
         if (c && id == MD_BGSWATCH && c->sw[2]) return (INT_PTR)c->sw[2];
@@ -4882,6 +6384,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
     case WM_COMMAND: {
         int id = LOWORD(wp);
         int code = HIWORD(wp);
+        if (c && ImgPageCommand(dlg, c, id, code)) return TRUE;   // 圖片置頂頁
         if (id == SD_NAV && code == LBN_SELCHANGE) {
             int sel = (int)SendDlgItemMessageW(dlg, SD_NAV, LB_GETCURSEL, 0, 0);
             if (c && sel >= 0 && sel != c->page) SelectPage(dlg, c, sel);
@@ -4936,6 +6439,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             return TRUE;
         }
         if (id == MD_APPLY && c) {
+            ImgPageApplyEdits(dlg, c);
             bool lc = false;
             if (CommitSettings(dlg, c, false, &lc) && lc) {   // 變更語言後重新建立視窗，套用新語言
                 c->reopen = true;
@@ -4944,6 +6448,7 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
             return TRUE;
         }
         if (id == IDOK && c) {
+            ImgPageApplyEdits(dlg, c);
             bool lc = false;
             if (!CommitSettings(dlg, c, true, &lc)) return TRUE;
             EndDialog(dlg, IDOK);
@@ -4963,6 +6468,8 @@ static INT_PTR CALLBACK SettingsDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp
                 if (c->sw[i]) DeleteObject(c->sw[i]);
                 c->sw[i] = NULL;
             }
+            if (c->imgSw) DeleteObject(c->imgSw);
+            c->imgSw = NULL;
             if (c->font) {
                 DeleteObject(c->font);
                 c->font = NULL;
@@ -5133,6 +6640,51 @@ static void BuildSettingsTemplate(std::vector<WORD>& t, SetCtx* c) {
     mon(CHK, 8, 354, 220, 12, MD_LOCK, BTN, T(S_MON_LOCK));
     mon(BS_PUSHBUTTON | WS_TABSTOP, 236, 352, 86, 14, MD_RESETPOS, BTN, T(S_MON_RESETPOS));
 
+    // ---- 圖片置頂 ----
+    auto img = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_IMG, st, x, y, cx, cy, id, cls, text); };
+    const DWORD NUMEDIT = HEXEDIT_PLAIN | ES_NUMBER;
+    img(CHK, 8, 6, 314, 12, SD_I_MASTER, BTN, T(S_IMG_MASTER));
+    img(CHK, 8, 20, 314, 12, SD_I_LOCKALL, BTN, T(S_IMG_LOCKALL));
+    img(BS_GROUPBOX, 8, 36, 314, 262, NOID, BTN, T(S_IMG_GROUPBOX));
+    img(SS_LEFT, 16, 52, 60, 10, NOID, STC, T(S_IMG_SEL));
+    img(COMBO, 80, 50, 232, 120, SD_I_SEL, CMB, L"");
+    img(CHK, 16, 68, 90, 12, SD_I_ENABLE, BTN, T(S_IMG_ENABLE));
+    img(CHK, 110, 68, 130, 12, SD_I_LOCK, BTN, T(S_IMG_LOCK));
+    img(SS_LEFT, 16, 86, 60, 10, NOID, STC, T(S_IMG_NAME));
+    img(HEXEDIT_PLAIN, 80, 84, 232, 12, SD_I_NAME, EDT, L"");
+    img(SS_LEFT, 16, 102, 60, 10, NOID, STC, T(S_IMG_SRC));
+    img(COMBO, 80, 100, 150, 80, SD_I_SRC, CMB, L"");
+    img(SS_LEFT, 236, 102, 8, 10, NOID, STC, L"#");
+    img(HEXEDIT_PLAIN, 246, 100, 46, 12, SD_I_COLOR, EDT, L"");
+    img(WS_BORDER | SS_LEFT, 296, 100, 14, 12, SD_I_COLORSW, STC, L"");
+    img(SS_LEFT, 16, 118, 60, 10, NOID, STC, T(S_IMG_PATH));
+    img(HEXEDIT_PLAIN, 80, 116, 178, 12, SD_I_PATH, EDT, L"");
+    img(BS_PUSHBUTTON | WS_TABSTOP, 262, 115, 50, 14, SD_I_BROWSE, BTN, T(S_IMG_BROWSE));
+    img(SS_LEFT, 16, 136, 62, 10, NOID, STC, T(S_IMG_OPACITY));
+    img(NUMEDIT, 80, 134, 32, 12, SD_I_OPACITY, EDT, L"");
+    img(SS_LEFT, 116, 136, 40, 10, NOID, STC, L"(5 ~ 100)");
+    img(SS_LEFT, 170, 136, 70, 10, NOID, STC, T(S_IMG_SCALE));
+    img(NUMEDIT, 244, 134, 36, 12, SD_I_SCALE, EDT, L"");
+    img(SS_LEFT, 16, 156, 10, 10, NOID, STC, L"X");
+    img(HEXEDIT_PLAIN, 28, 154, 40, 12, SD_I_X, EDT, L"");
+    img(SS_LEFT, 78, 156, 10, 10, NOID, STC, L"Y");
+    img(HEXEDIT_PLAIN, 90, 154, 40, 12, SD_I_Y, EDT, L"");
+    img(SS_LEFT, 142, 156, 22, 10, NOID, STC, T(S_IMG_W));
+    img(NUMEDIT, 166, 154, 40, 12, SD_I_W, EDT, L"");
+    img(SS_LEFT, 216, 156, 22, 10, NOID, STC, T(S_IMG_H));
+    img(NUMEDIT, 240, 154, 40, 12, SD_I_H, EDT, L"");
+    img(CHK, 16, 174, 100, 12, SD_I_FLIP, BTN, T(S_IMG_FLIP));
+    img(SS_LEFT, 124, 176, 36, 10, NOID, STC, T(S_IMG_ROT));
+    img(COMBO, 162, 172, 56, 80, SD_I_ROT, CMB, L"");
+    img(SS_LEFT, 16, 196, 150, 10, NOID, STC, T(S_IMG_Z));
+    img(COMBO, 170, 194, 50, 120, SD_I_Z, CMB, L"");
+    img(CHK, 16, 212, 296, 12, SD_I_FGONLY, BTN, T(S_IMG_FGONLY));
+    img(CHK, 16, 228, 130, 12, SD_I_GIFPAUSE, BTN, T(S_IMG_GIFPAUSE));
+    img(SS_LEFT, 150, 230, 62, 10, NOID, STC, T(S_IMG_GIFSPEED));
+    img(COMBO, 214, 226, 98, 100, SD_I_GIFSPEED, CMB, L"");
+    img(BS_PUSHBUTTON | WS_TABSTOP, 16, 246, 130, 14, SD_I_RESETSIZE, BTN, T(S_IMG_RESETSIZE));
+    img(SS_LEFT, 16, 266, 296, 30, NOID, STC, T(S_IMG_NOTE));
+
     // ---- 其他 ----
     auto oth = [&](DWORD st, int x, int y, int cx, int cy, WORD id, WORD cls, const wchar_t* text) { pg(SP_OTHER, st, x, y, cx, cy, id, cls, text); };
     oth(SS_LEFT, 8, 12, 120, 10, NOID, STC, T(S_M_DBLCLICK));
@@ -5160,17 +6712,20 @@ static void BuildSettingsTemplate(std::vector<WORD>& t, SetCtx* c) {
     t[cditPos] = (WORD)n;
 }
 
-static void ShowSettingsDialog() {
+static void ShowSettingsDialog(int page = -1) {
     if (g_setDlg) {
+        if (page >= 0) PostMessageW(g_setDlg, WM_SD_SELPAGE, (WPARAM)page, 0);
         SetForegroundWindow(g_setDlg);
         return;
     }
     SetCtx ctx;
     ctx.before = CaptureOv();   // 開啟視窗時的監控設定 (按取消時回復)
     ctx.sw[0] = ctx.sw[1] = ctx.sw[2] = NULL;
+    ctx.imgSw = NULL;
     ctx.dragIdx = -1;
     ctx.insertPos = -1;
-    ctx.page = SP_WINDOW;
+    ctx.page = (page >= 0 && page < SP_COUNT) ? page : SP_WINDOW;
+    ctx.imgSel = 0;
     ctx.font = NULL;
     ctx.linkFont = NULL;
     ctx.paused = false;
@@ -5205,6 +6760,50 @@ static void BuildMonitorMenu(HMENU parent) {
     AppendMenuW(mon, MF_STRING | Chk(g_ovEnabled), ID_OV_ENABLE, T(S_MON_ENABLE));
     AppendMenuW(mon, MF_STRING | Chk(g_ovLocked), ID_OV_LOCK, T(S_MON_LOCK));
     AppendMenuW(parent, MF_POPUP, (UINT_PTR)mon, T(S_M_MON));
+}
+
+static void BuildImageMenu(HMENU parent) {
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING | Chk(g_imgMaster), ID_IMG_MASTER, T(S_IMG_MASTER));
+    AppendMenuW(m, MF_STRING | Chk(g_imgLockAll), ID_IMG_LOCKALL, T(S_IMG_LOCKALL));
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    for (int i = 0; i < kImgGroups; ++i) {
+        wchar_t b[64];
+        wsprintfW(b, T(S_IMG_GROUP), i + 1);
+        std::wstring s = b;
+        if (!g_img[i].name.empty()) {
+            std::wstring nm = g_img[i].name;
+            for (size_t k = nm.find(L'&'); k != std::wstring::npos; k = nm.find(L'&', k + 2)) nm.insert(k, 1, L'&');   // 選單的 & 是快速鍵符號
+            s += L"：";
+            s += nm;
+        }
+        AppendMenuW(m, MF_STRING | Chk(g_img[i].enabled), ID_IMG_GROUP_BASE + i, s.c_str());
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, ID_IMG_SETTINGS, T(S_IMG_SETTINGS));
+    AppendMenuW(parent, MF_POPUP, (UINT_PTR)m, T(S_M_IMG));
+}
+
+static void HandleImageCommand(int id) {
+    if (id == ID_IMG_SETTINGS) {
+        ShowSettingsDialog(SP_IMG);
+        return;
+    }
+    if (id == ID_IMG_MASTER) {
+        g_imgMaster = !g_imgMaster;
+        SaveInt(L"ImgMaster", g_imgMaster ? 1 : 0);
+        ImgSyncAll();
+    } else if (id == ID_IMG_LOCKALL) {
+        g_imgLockAll = !g_imgLockAll;
+        SaveInt(L"ImgLockAll", g_imgLockAll ? 1 : 0);
+        ImgSyncAll();
+    } else if (id >= ID_IMG_GROUP_BASE && id < ID_IMG_GROUP_BASE + kImgGroups) {
+        int i = id - ID_IMG_GROUP_BASE;
+        g_img[i].enabled = !g_img[i].enabled;
+        SaveIntS(ImgSec(i), L"Enabled", g_img[i].enabled ? 1 : 0);
+        ImgSync(i, true);
+    }
+    ImgNotifyDlg(-1);   // 設定視窗開啟時同步更新畫面上的勾選
 }
 
 static void HandleOverlayCommand(int id) {
@@ -5734,6 +7333,8 @@ static void ShowMenu(HWND hwnd) {
     AppendMenuW(m, MF_POPUP, (UINT_PTR)cpu, T(S_M_LIMIT));
     BuildMonitorMenu(m);
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    BuildImageMenu(m);
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
 
     HMENU rs = CreatePopupMenu();
     AppendMenuW(rs, MF_STRING, ID_RESTART_CLIENT, T(S_M_RESTART_CLIENT));
@@ -5847,6 +7448,8 @@ static void HandleCommand(int id) {
             SaveInt(L"DoubleClick", g_dblAction);
         } else if (id >= ID_OV_ENABLE && id <= ID_OV_LAST) {
             HandleOverlayCommand(id);
+        } else if (id >= ID_IMG_MASTER && id <= ID_IMG_LAST) {
+            HandleImageCommand(id);
         } else if (id >= ID_LANG_BASE && id <= ID_LANG_BASE + kLangCount) {
             g_langSetting = id - ID_LANG_BASE;
             ApplyLanguage();
@@ -5881,12 +7484,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ModeCheck();
         } else if (wp == 7) {
             UpdateMouseClip();
+        } else if (wp == 9) {
+            ImgCheckCovered();   // 圖片置頂：被工作列 / 遊戲視窗蓋住時重新置頂
         } else if (wp == 8) {
             HideToast();   // 圖示上方的提示顯示時間到
         } else if (wp == 2) {
             if (CursorOnTrayIcon()) ApplyTrayState();   // 仍停留在圖示上：更新提示
             else KillTimer(hwnd, 2);                    // 已離開：停止更新
         }
+        return 0;
+    case WM_DISPLAYCHANGE:
+        ImgSyncAll();   // 螢幕解析度 / 數量改變：重新修正圖片的位置
         return 0;
     case WM_UI_REAPPLY:
         ApplyBaseSettings((DWORD)wp);
@@ -6055,6 +7663,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     g_engine = std::thread(EngineThread);
     CreateOverlayWindow();
+    ImgSyncAll();
     StartMonitor();
     UpdateFpsSession();
     UpdateOverlayVisibility();
@@ -6065,6 +7674,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         DispatchMessageW(&msg);
     }
 
+    ImgShutdown();
     ReleaseMouseClip();                              // 結束本工具前先放掉滑鼠範圍限制
     if (g_menuTip) DestroyWindow(g_menuTip);
     if (g_toastTip) DestroyWindow(g_toastTip);
